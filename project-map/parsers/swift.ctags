@@ -1,0 +1,44 @@
+# Swift parser for Universal Ctags (optlib / regex-based).
+#
+# Stock Universal Ctags ships NO Swift parser (`ctags --print-language X.swift`
+# returns NONE), so a Swift-only repo indexes to zero symbols. build-map.py
+# loads this file via `--options=` *only when* ctags reports no native Swift
+# support, so it stays inert (and conflict-free) once upstream adds one.
+#
+# This is a heuristic, line-based parser: it captures the architectural surface
+# (types + top-level/method funcs), not every declaration. Each pattern is
+# anchored at line start and allows a run of whitelisted modifiers/attributes
+# before the keyword, so it tolerates `public final class`, `@MainActor func`,
+# `class func`, etc. without matching keywords inside comments or identifiers.
+# A trailing delimiter ([:{<], "(", "=") disambiguates e.g. `class func foo(`
+# (a function, not a class named "foo").
+
+--langdef=Swift
+--map-Swift=+.swift
+
+--kinddef-Swift=c,class,classes
+--kinddef-Swift=s,struct,structs
+--kinddef-Swift=e,enum,enums
+--kinddef-Swift=P,protocol,protocols
+--kinddef-Swift=x,extension,extensions
+--kinddef-Swift=a,actor,actors
+--kinddef-Swift=t,typealias,typealiases
+--kinddef-Swift=f,function,functions
+
+# Type declarations. Modifier whitelist excludes `class`/`static` so the
+# keyword is never consumed by the prefix; trailing [:{<] rejects `class func`.
+--regex-Swift=/^[ \t]*((@[A-Za-z0-9_]+|public|private|internal|fileprivate|open|final|indirect|distributed)[ \t]+)*class[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*[:{<]/\3/c/
+--regex-Swift=/^[ \t]*((@[A-Za-z0-9_]+|public|private|internal|fileprivate|open|final|indirect|distributed)[ \t]+)*struct[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*[:{<]/\3/s/
+--regex-Swift=/^[ \t]*((@[A-Za-z0-9_]+|public|private|internal|fileprivate|open|final|indirect|distributed)[ \t]+)*enum[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*[:{<]/\3/e/
+--regex-Swift=/^[ \t]*((@[A-Za-z0-9_]+|public|private|internal|fileprivate|open|final|indirect|distributed)[ \t]+)*protocol[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*[:{<]/\3/P/
+--regex-Swift=/^[ \t]*((@[A-Za-z0-9_]+|public|private|internal|fileprivate|open|final|indirect|distributed)[ \t]+)*actor[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*[:{<]/\3/a/
+
+# Extensions: the keyword is unambiguous at line start, so no trailing guard.
+--regex-Swift=/^[ \t]*((@[A-Za-z0-9_]+|public|private|internal|fileprivate|open|final)[ \t]+)*extension[ \t]+([A-Za-z_][A-Za-z0-9_.]*)/\3/x/
+
+# typealias Name = ...
+--regex-Swift=/^[ \t]*((@[A-Za-z0-9_]+|public|private|internal|fileprivate|open)[ \t]+)*typealias[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*=/\3/t/
+
+# Functions/methods. Whitelist includes `class`/`static` (for `class func`),
+# plus method modifiers; trailing "(" or "<" (generic) confirms it is a func.
+--regex-Swift=/^[ \t]*((@[A-Za-z0-9_]+|public|private|internal|fileprivate|open|final|static|class|override|mutating|nonmutating|required|convenience|dynamic|optional|prefix|postfix|infix)[ \t]+)*func[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*[(<]/\3/f/
