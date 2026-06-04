@@ -90,3 +90,8 @@ Re-run `/project-map update` after substantial changes.
   or "stop wasting tokens exploring."
 - After a substantial refactor or merge — offer `/project-map update`.
 - At the start of a session in a mapped repo, if `/project-map status` would show heavy drift.
+- During a **handoff**: the handoff skill runs `build-map.py status` to detect a missing or
+  stale map. On *resume* it offers to `build`/`update` so the fresh session reads this map
+  instead of re-scanning the repo; on *create* it records the rebuild as a next step rather
+  than spending build tokens at wrap-up. A current map keeps handoff docs small (they link
+  `ARCHITECTURE.md` instead of re-describing structure), so the two skills compound.

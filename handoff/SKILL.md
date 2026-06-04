@@ -22,6 +22,8 @@ If arguments describe the next session's focus, tailor "Next Steps" and "Suggest
 
 Save to **`$TMPDIR/claude-handoff-<YYYY-MM-DD-HHMM>.md`** (on Windows use `%TEMP%`). The SessionStart hook auto-detects files matching `claude-handoff-*.md`, so keep that prefix.
 
+Run the **Project map check** (below) first. If the map is missing or stale, **don't build it now** — you're wrapping up and it costs tokens. Instead record it as a Next Step (e.g. `[P1] Run /project-map update (map stale)`) so the resuming session does it with fresh budget.
+
 ### Full document
 
 ```markdown
@@ -31,23 +33,22 @@ Save to **`$TMPDIR/claude-handoff-<YYYY-MM-DD-HHMM>.md`** (on Windows use `%TEMP
 > **Suggested skills**: [skill-1], [skill-2], ...
 
 ## What We're Building
-[High-level description. Reference existing artifacts by path/URL — do not duplicate.]
+[1-3 bullets max. Reference artifacts by path/URL — do not duplicate. If `.projectmap/` exists, link `.projectmap/ARCHITECTURE.md` instead of re-describing structure.]
 
 ## Progress
 - [x] Done item
 - [ ] In-progress item (blocked by X)
 
-## What Worked
-- Approach A: ...
-
-## What Didn't Work
-- Approach B: ... (reason — don't repeat this)
+## What Worked / Avoid
+- ✓ Approach A worked
+- ✗ Approach B failed — reason (don't retry)
 
 ## Key Decisions
 - Chose X over Y because ...
 
 ## References
-- `docs/prd.md`, `docs/adr/001-choice.md`
+- Codebase map (if present): `.projectmap/ARCHITECTURE.md`, `.projectmap/modules/<name>.md`
+- Docs: `docs/prd.md`, `docs/adr/001-choice.md`
 - Commits: `abc1234`, `def5678`
 
 ## Next Steps
@@ -55,6 +56,10 @@ Save to **`$TMPDIR/claude-handoff-<YYYY-MM-DD-HHMM>.md`** (on Windows use `%TEMP
 2. [P1] Important follow-up
 3. [P2] Nice to have
 ```
+
+**Keep it lean** — the next session reads this back, so every line costs tokens twice (to write, then to re-read):
+- Bullets only, no prose. Hard cap ~5 bullets per section; delete any section that would be empty.
+- Pointers over content: link commits, diffs, `.projectmap/`, PRDs — never paste their contents.
 
 **Quick mode**: keep only the goal, suggested skills, and 3-5 next steps.
 
@@ -65,15 +70,38 @@ Triggered when the user confirms a resume — either after the SessionStart hook
 1. Read the handoff file.
 2. Load any skills listed under "Suggested skills".
 3. Summarize state (goal + progress) for the user.
-4. Start from the highest-priority "Next Steps" item.
-5. Keep the file updated as work progresses (check off items, add new ones).
+4. Run the **Project map check** (below). If the map is missing or stale, this is the moment to build/update — offer it, and on confirmation follow the project-map skill's workflow before continuing. Then use the map to regain context: read `ARCHITECTURE.md`, grep `.projectmap/tags`, open only the source files the next step needs. Don't re-scan the repo.
+5. Start from the highest-priority "Next Steps" item.
+6. Append updates as work progresses (check off items, add new ones) — don't rewrite the whole file.
+
+## Project map check
+
+A committed `.projectmap/` lets the next session skip re-scanning the repo (see the project-map skill). Detect its state with this **read-only, no-LLM-token, no-write** command — run it both when creating and when resuming:
+
+```sh
+python3 ~/.claude/skills/project-map/build-map.py status .
+```
+
+Interpret the output:
+
+| Output contains | State | Action |
+|---|---|---|
+| `no source files found` | not a code repo | skip — project map is irrelevant |
+| `no manifest yet` | no map | **building costs tokens + needs `universal-ctags`** — never silent |
+| `Run /project-map update to refresh` | stale | incremental update (cheaper) |
+| `Map is up to date` | current | nothing to do |
+
+Then act by lifecycle moment — **detection is automatic; building/updating is not silent**:
+
+- **Resuming** (fresh budget, pays off this session): if stale/missing, offer to run `/project-map update` or `/project-map build`. On confirmation, follow the project-map skill's workflow, then continue the resume.
+- **Creating** (wrapping up — don't spend build tokens now): record the state as a Next Step instead, e.g. `[P1] Run /project-map update (map stale)` or `[P2] /project-map build — no map yet; would cut next session's exploration`.
 
 ## Rules
 
 - **Redact** all secrets (API keys, passwords, tokens) and PII before writing.
 - Save only to the OS temp dir — **never** the project workspace.
 - First line of every handoff: `<!-- HIGHLY SENSITIVE. Do not share this file. -->`
-- Reference existing artifacts (PRDs, ADRs, issues, commits, diffs) by path/URL — never duplicate their content.
+- Reference existing artifacts (PRDs, ADRs, issues, commits, diffs, `.projectmap/`) by path/URL — never duplicate their content.
 
 ## When to Suggest
 
