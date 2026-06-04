@@ -8,6 +8,7 @@ Personal collection of [Claude Code](https://claude.com/claude-code) Agent Skill
 | [`grill-me`](./grill-me) | Stress-tests a plan or design by interviewing you relentlessly until the decision tree is resolved. |
 | [`caveman`](./caveman) | Ultra-compressed communication mode — cuts token usage ~75% while keeping technical accuracy. |
 | [`project-map`](./project-map) | Builds a committed, on-demand `.projectmap/` index (ctags symbols + short module summaries) so agents remember the codebase and grep the map instead of re-scanning the repo. Includes `build-map.py`; requires `universal-ctags`. |
+| [`llm-council`](./llm-council) | Convenes a multi-model council — Codex (ChatGPT sub), Gemini (Antigravity `agy`), Claude (`claude -p`), and DeepSeek (opencode, free) — to answer a question, cross-review each other anonymously, then this session chairs the synthesis. Inspired by [karpathy/llm-council](https://github.com/karpathy/llm-council); every member runs through its **own subscription/sign-in CLI**, no API keys. Includes `council.py` (parallel dispatch). |
 
 ## How `handoff` + `project-map` compose
 
