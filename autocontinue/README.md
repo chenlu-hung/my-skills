@@ -42,9 +42,12 @@ launchd agent（每 5 分鐘；Mac 睡著就跟著睡，醒來補跑）
 
 ## 已知限制與校準
 
-- `error_message` 的實際格式官方文件未定義。解析器支援 `|<epoch>`、ISO 時間、`resets at 3pm`
-  等格式；解析不到就退化成「中斷後每 15 分鐘嘗試一次」（失敗會被 hook 重新入列並計入停損）。
-  第一次真實撞 limit 後，看 `stopfailure-raw.jsonl` 確認格式，必要時補 pattern。
+- StopFailure payload 實測欄位：error kind 在 `error`（值 `rate_limit`），可讀訊息（含 reset
+  時間）在 `last_assistant_message`，格式如 `You've hit your session limit · resets 2:50am
+  (Asia/Taipei)`；hook 同時相容假設過的 `error_type` / `error_message` 欄名。解析器支援
+  `|<epoch>`、ISO 時間、`resets 2:50am` 等格式；解析不到就退化成「中斷後每 15 分鐘嘗試一次」
+  （失敗會被 hook 重新入列並計入停損）。新版 Claude Code 若改格式，看 `stopfailure-raw.jsonl`
+  比對、必要時補 pattern。
 - default 權限模式的 session 復活後，遇到第一個需要授權的工具就會停（headless 下無人可按
   允許）——這是「不自動升權」的刻意取捨。要無人值守跑完，發任務時就用
   `--dangerously-skip-permissions` 或 acceptEdits。

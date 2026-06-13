@@ -31,8 +31,13 @@ def main():
     except ValueError:
         payload = {}
 
-    error_type = payload.get("error_type")
-    error_message = payload.get("error_message") or ""
+    # Claude Code's StopFailure payload carries the error kind in "error" and
+    # the human-readable text (with the reset time) in "last_assistant_message".
+    # Older/assumed names are accepted too in case the schema varies.
+    error_type = payload.get("error_type") or payload.get("error")
+    error_message = (
+        payload.get("error_message") or payload.get("last_assistant_message") or ""
+    )
     is_rate_limit = error_type == "rate_limit" or (
         error_type is None and "limit" in error_message.lower()
     )
