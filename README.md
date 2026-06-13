@@ -9,6 +9,15 @@ Personal collection of [Claude Code](https://claude.com/claude-code) Agent Skill
 | [`caveman`](./caveman) | Ultra-compressed communication mode — cuts token usage ~75% while keeping technical accuracy. |
 | [`project-map`](./project-map) | Builds a committed, on-demand `.projectmap/` index (ctags symbols + short module summaries) so agents remember the codebase and grep the map instead of re-scanning the repo. Includes `build-map.py`; requires `universal-ctags`. |
 | [`llm-council`](./llm-council) | Convenes a multi-model council — Codex (ChatGPT sub), Gemini (Antigravity `agy`), Claude (`claude -p`), and DeepSeek (opencode, free) — to answer a question, cross-review each other anonymously, then this session chairs the synthesis. Inspired by [karpathy/llm-council](https://github.com/karpathy/llm-council); every member runs through its **own subscription/sign-in CLI**, no API keys. Includes `council.py` (parallel dispatch). |
+| [`dispatch`](./dispatch) | Delegates coding tasks to external agent CLIs as writable **worker subagents** — Codex (ChatGPT sub), Gemini (Antigravity `agy`), and DeepSeek (opencode, free). Splits work into self-contained briefs, runs workers in parallel (optionally in isolated git worktrees), then this session reviews and merges. Each worker runs through its **own subscription/sign-in CLI**, no API keys. Includes `dispatch.py`. |
+
+## Tools
+
+Not a skill, but lives here too:
+
+| Tool | Purpose |
+|---|---|
+| [`autocontinue`](./autocontinue) | Auto-resumes a Claude Code session after a usage-limit reset. A `StopFailure` hook queues the interrupted session; a launchd agent (every 5 min) resumes it headlessly once the limit resets, reusing the original permission mode and stopping after a configurable chain limit. Install once via `autocontinue/install.sh` — applies to all sessions. macOS only. |
 
 ## How `handoff` + `project-map` compose
 
