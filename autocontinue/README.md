@@ -48,6 +48,10 @@ launchd agent（每 5 分鐘；Mac 睡著就跟著睡，醒來補跑）
   `|<epoch>`、ISO 時間、`resets 2:50am` 等格式；解析不到就退化成「中斷後每 15 分鐘嘗試一次」
   （失敗會被 hook 重新入列並計入停損）。新版 Claude Code 若改格式，看 `stopfailure-raw.jsonl`
   比對、必要時補 pattern。
+- `claude --resume <id>` 只認「啟動目錄」那個 project 底下的 session id；payload 的 `cwd` 可能是
+  子目錄（如某 skill 在 `.claude/app` 裡工作），直接拿它復活會落到別的 project、報
+  `No conversation found`。所以復活目錄改由 `transcript_path` 反推：從 `cwd` 往上找第一個
+  「編碼後（非英數字一律轉 `-`）等於 transcript project 目錄名」的祖先。解析不到才退回 `cwd`。
 - default 權限模式的 session 復活後，遇到第一個需要授權的工具就會停（headless 下無人可按
   允許）——這是「不自動升權」的刻意取捨。要無人值守跑完，發任務時就用
   `--dangerously-skip-permissions` 或 acceptEdits。

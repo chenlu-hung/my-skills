@@ -60,6 +60,7 @@ def main():
         "root_id": root,
         "session_id": sid,
         "cwd": payload.get("cwd") or prev.get("cwd") or os.path.expanduser("~"),
+        "transcript_path": payload.get("transcript_path") or prev.get("transcript_path"),
         "permission_mode": payload.get("permission_mode")
         or prev.get("permission_mode")
         or "default",

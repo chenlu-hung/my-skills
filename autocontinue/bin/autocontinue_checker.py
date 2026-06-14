@@ -107,8 +107,8 @@ def retire(path, entry, status, dest_dir):
 
 def run_resume(entry, cfg, claude_bin):
     root = entry["root_id"]
-    cwd = entry.get("cwd") or os.path.expanduser("~")
-    if not os.path.isdir(cwd):
+    cwd = ac.resume_dir(entry.get("transcript_path"), entry.get("cwd"))
+    if not cwd or not os.path.isdir(cwd):
         cwd = os.path.expanduser("~")
 
     env = os.environ.copy()

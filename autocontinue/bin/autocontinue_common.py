@@ -120,6 +120,41 @@ def fmt_time(epoch):
     return time.strftime("%m/%d %H:%M", time.localtime(epoch))
 
 
+def encode_project(path):
+    """Replicate Claude Code's project-dir encoding (every non-alnum -> '-').
+
+    Claude stores a session under ~/.claude/projects/<encode(launch_dir)>/, so
+    this lets us recognise which real directory a transcript belongs to.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def resume_dir(transcript_path, cwd):
+    """Directory to run `claude --resume <id>` from.
+
+    A session id resolves only within the project of the directory `claude` was
+    launched in (its root). The StopFailure payload's `cwd` can be a *sub*-
+    directory of that root (e.g. a skill working in `.claude/app`), and resuming
+    from there lands in a different project where the session does not exist
+    ("No conversation found"). So we walk up from cwd until a parent encodes to
+    the same name as the transcript's project directory, and resume from there.
+    Falls back to cwd when nothing matches (e.g. payloads without a transcript).
+    """
+    if not cwd:
+        return cwd
+    if not transcript_path:
+        return cwd
+    want = os.path.basename(os.path.dirname(transcript_path))
+    d = os.path.abspath(os.path.expanduser(cwd))
+    while True:
+        if encode_project(d) == want and os.path.isdir(d):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return cwd
+        d = parent
+
+
 def entry_path(root_id):
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", root_id)
     return os.path.join(QUEUE_DIR, safe + ".json")
