@@ -38,4 +38,4 @@ cp -R handoff ~/.claude/skills/
 
 > **Note**: `handoff`'s SessionStart hook must be registered separately in `~/.claude/settings.json` and references `~/.claude/skills/handoff/check-handoff.sh`.
 >
-> **Note**: `dispatch`'s auto-dispatch layer wires up separately too — copy `dispatch/dispatch-nudge.sh` to `~/.claude/hooks/` and register it as a `UserPromptSubmit` hook in `~/.claude/settings.json`, and copy `dispatch/dispatch-policy.md` to `~/.claude/` and `@`-include it from `~/.claude/CLAUDE.md`.
+> **Note**: `dispatch`'s auto-dispatch layer (nudge hook + policy) installs via `dispatch/install.sh` — it copies the skill/hook/policy, registers the `UserPromptSubmit` hook in `~/.claude/settings.json`, and `@`-includes the policy from `~/.claude/CLAUDE.md`. Safe to re-run to update.
