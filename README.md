@@ -9,7 +9,7 @@ Personal collection of [Claude Code](https://claude.com/claude-code) Agent Skill
 | [`caveman`](./caveman) | Ultra-compressed communication mode — cuts token usage ~75% while keeping technical accuracy. |
 | [`project-map`](./project-map) | Builds a committed, on-demand `.projectmap/` index (ctags symbols + short module summaries) so agents remember the codebase and grep the map instead of re-scanning the repo. Includes `build-map.py`; requires `universal-ctags`. |
 | [`llm-council`](./llm-council) | Convenes a multi-model council — Codex (ChatGPT sub), Gemini (Antigravity `agy`), Claude (`claude -p`), and DeepSeek (opencode, free) — to answer a question, cross-review each other anonymously, then this session chairs the synthesis. Inspired by [karpathy/llm-council](https://github.com/karpathy/llm-council); every member runs through its **own subscription/sign-in CLI**, no API keys. Includes `council.py` (parallel dispatch). |
-| [`dispatch`](./dispatch) | Delegates coding tasks to external agent CLIs as writable **worker subagents** — Codex (ChatGPT sub), Gemini (Antigravity `agy`), and DeepSeek (opencode, free). Splits work into self-contained briefs, runs workers in parallel (optionally in isolated git worktrees), then this session reviews and merges. Each worker runs through its **own subscription/sign-in CLI**, no API keys. Includes `dispatch.py`. |
+| [`dispatch`](./dispatch) | Delegates coding tasks to external agent CLIs as writable **worker subagents** — Codex (ChatGPT sub), Gemini (Antigravity `agy`), and DeepSeek (opencode, free). Splits work into self-contained briefs, runs workers in parallel (optionally in isolated git worktrees), then this session reviews and merges. Each worker runs through its **own subscription/sign-in CLI**, no API keys. Includes `dispatch.py`, plus an opt-in **auto-dispatch** layer: a `UserPromptSubmit` hook (`dispatch-nudge.sh`) that, on bulk/parallel/mechanical prompts, forces a one-line DISPATCH-or-SELF verdict before any code is written, governed by `dispatch-policy.md`. |
 
 ## Tools
 
@@ -37,3 +37,5 @@ cp -R handoff ~/.claude/skills/
 ```
 
 > **Note**: `handoff`'s SessionStart hook must be registered separately in `~/.claude/settings.json` and references `~/.claude/skills/handoff/check-handoff.sh`.
+>
+> **Note**: `dispatch`'s auto-dispatch layer wires up separately too — copy `dispatch/dispatch-nudge.sh` to `~/.claude/hooks/` and register it as a `UserPromptSubmit` hook in `~/.claude/settings.json`, and copy `dispatch/dispatch-policy.md` to `~/.claude/` and `@`-include it from `~/.claude/CLAUDE.md`.
