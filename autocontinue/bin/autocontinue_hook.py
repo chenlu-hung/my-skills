@@ -64,6 +64,9 @@ def main():
         "permission_mode": payload.get("permission_mode")
         or prev.get("permission_mode")
         or "default",
+        # Preserve the handoff "already seeded" flag so a re-queued handoff
+        # session is resumed normally next time instead of seeding again.
+        "seeded": prev.get("seeded", False),
         "interrupted_at": now,
         "reset_at": reset_at,
         "attempts": prev.get("attempts", 0),

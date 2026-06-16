@@ -105,7 +105,21 @@ def retire(path, entry, status, dest_dir):
     shutil.move(path, dest)
 
 
-def run_resume(entry, cfg, claude_bin):
+def build_cmd(entry, cfg, claude_bin, seed):
+    """Resume the same session, or (handoff seed) start a fresh session whose
+    only context is a pointer to the original transcript."""
+    if seed:
+        prompt = ac.render_handoff_prompt(cfg, entry.get("transcript_path"))
+        cmd = [claude_bin, "-p", prompt]
+    else:
+        cmd = [claude_bin, "--resume", entry["session_id"], "-p", cfg["resume_prompt"]]
+    cmd += perm_args(entry.get("permission_mode", "default"))
+    if cfg.get("resume_model"):
+        cmd += ["--model", cfg["resume_model"]]
+    return cmd
+
+
+def run_resume(entry, cfg, claude_bin, seed):
     root = entry["root_id"]
     cwd = ac.resume_dir(entry.get("transcript_path"), entry.get("cwd"))
     if not cwd or not os.path.isdir(cwd):
@@ -117,16 +131,21 @@ def run_resume(entry, cfg, claude_bin):
     path_parts += env.get("PATH", "/usr/bin:/bin").split(":")
     env["PATH"] = ":".join(dict.fromkeys(p for p in path_parts if p))
 
-    cmd = [claude_bin, "--resume", entry["session_id"], "-p", cfg["resume_prompt"]]
-    cmd += perm_args(entry.get("permission_mode", "default"))
+    cmd = build_cmd(entry, cfg, claude_bin, seed)
 
     log_path = os.path.join(
         ac.SESSION_LOG_DIR, os.path.basename(ac.entry_path(root)).replace(".json", ".log")
     )
     with open(log_path, "a") as lf:
         lf.write(
-            "\n===== %s attempt %d session=%s cwd=%s =====\n"
-            % (time.strftime("%Y-%m-%d %H:%M:%S"), entry["attempts"], entry["session_id"], cwd)
+            "\n===== %s attempt %d %s session=%s cwd=%s =====\n"
+            % (
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                entry["attempts"],
+                "handoff" if seed else "resume",
+                entry["session_id"],
+                cwd,
+            )
         )
         lf.flush()
         return subprocess.call(
@@ -178,6 +197,17 @@ def main():
                 ac.log("checker", "claude binary not found (%s); will retry next tick" % cfg["claude_bin"])
                 break
 
+            # Handoff mode escapes the giant transcript exactly once: the first
+            # revival starts a fresh session pointed at the transcript; the hook
+            # re-queues that small session, and `seeded` makes later revivals
+            # resume it normally. Needs a transcript to point at, else fall back.
+            seed = (
+                cfg.get("resume_mode") == "handoff"
+                and not entry.get("seeded")
+                and bool(entry.get("transcript_path"))
+            )
+            if seed:
+                entry["seeded"] = True
             entry["attempts"] += 1
             entry["status"] = "running"
             entry["last_attempt_at"] = now
@@ -185,11 +215,21 @@ def main():
             ac.notify(
                 cfg,
                 "Autocontinue 復活",
-                "%s：第 %d/%d 次接力" % (project, entry["attempts"], cfg["max_attempts"]),
+                "%s：第 %d/%d 次%s"
+                % (
+                    project,
+                    entry["attempts"],
+                    cfg["max_attempts"],
+                    "接力（handoff 新 session）" if seed else "接力",
+                ),
             )
-            ac.log("checker", "resuming %s attempt %d" % (entry["root_id"], entry["attempts"]))
+            ac.log(
+                "checker",
+                "%s %s attempt %d"
+                % ("seeding" if seed else "resuming", entry["root_id"], entry["attempts"]),
+            )
 
-            rc = run_resume(entry, cfg, claude_bin)
+            rc = run_resume(entry, cfg, claude_bin, seed)
 
             current = ac.read_entry(path)
             if current is None:

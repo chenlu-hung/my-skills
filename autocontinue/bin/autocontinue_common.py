@@ -20,9 +20,30 @@ DEFAULT_CONFIG = {
     "max_attempts": 10,
     "min_retry_wait_sec": 900,
     "resume_buffer_sec": 120,
+    # None keeps the resumed session's own model. Set to "sonnet" / "haiku" / a
+    # model id to re-read the transcript at a cheaper input rate on every revival
+    # (applies to both resume modes below).
+    "resume_model": None,
+    # "session": resume the same session — its full transcript is replayed (and,
+    #   hours after a reset, re-read at full price because the prompt cache is
+    #   cold) on every revival. Lossless, but cost scales with transcript size.
+    # "handoff": on the *first* revival, start a fresh session seeded only with a
+    #   pointer to the original transcript instead of replaying it; the new (small)
+    #   session is then resumed normally on any later revival. Cheaper, but the
+    #   fresh session only knows what it reads back from the transcript on demand.
+    "resume_mode": "session",
     "resume_prompt": (
         "你剛才因為 usage limit 而中斷，現在額度已重置。"
         "請從上次的進度繼續完成原本的任務；若任務其實已完成，確認狀態後即可結束。"
+    ),
+    # Seed prompt for handoff mode. {transcript_path} is substituted (via
+    # str.replace, so stray braces in a customised prompt are harmless).
+    "handoff_prompt": (
+        "你正在接手一個因 usage limit 中斷的任務，額度已重置。"
+        "上一個 session 的完整對話記錄（JSONL，每行一則訊息）在：\n{transcript_path}\n"
+        "請先只讀取該檔案的結尾部分（例如 `tail -n 80`）來掌握原本的任務目標與中斷時的進度；"
+        "需要更早的脈絡（某個決策的理由、先前讀過的檔案內容）時，再針對性地 grep 那個檔案，"
+        "不要整份讀進來。接著從中斷處繼續完成原本的任務；若其實已完成，確認狀態後即可結束。"
     ),
     "notify": True,
 }
@@ -118,6 +139,16 @@ def parse_reset_time(message, now=None):
 
 def fmt_time(epoch):
     return time.strftime("%m/%d %H:%M", time.localtime(epoch))
+
+
+def render_handoff_prompt(cfg, transcript_path):
+    """Seed prompt for a fresh handoff session.
+
+    Uses str.replace (not str.format) so a user-customised prompt with stray
+    braces can't raise. Falls back to the default template if unset.
+    """
+    template = cfg.get("handoff_prompt") or DEFAULT_CONFIG["handoff_prompt"]
+    return template.replace("{transcript_path}", transcript_path or "")
 
 
 def encode_project(path):
