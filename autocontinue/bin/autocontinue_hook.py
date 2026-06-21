@@ -67,6 +67,13 @@ def main():
         # Preserve the handoff "already seeded" flag so a re-queued handoff
         # session is resumed normally next time instead of seeding again.
         "seeded": prev.get("seeded", False),
+        # For resume_mode "inject": this hook runs inside the rate-limited
+        # session's process tree, so when that session lives in a kitty window
+        # with remote control on, kitty has exported these into our env. They
+        # let the checker later type the resume prompt back into this exact
+        # window. Absent (kept from prev) when not in a kitty/RC context.
+        "kitty_window_id": os.environ.get("KITTY_WINDOW_ID") or prev.get("kitty_window_id"),
+        "kitty_listen_on": os.environ.get("KITTY_LISTEN_ON") or prev.get("kitty_listen_on"),
         "interrupted_at": now,
         "reset_at": reset_at,
         "attempts": prev.get("attempts", 0),

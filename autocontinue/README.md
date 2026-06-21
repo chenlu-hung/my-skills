@@ -37,6 +37,39 @@ reset 常在數小時後才發生，那時 prompt cache 早已過期（預設 5 
 
 兩者可疊加（handoff 的新 session 也跑 `resume_model`）。改完 `config.json` 直接生效，不必重裝。
 
+## 在你看得到的視窗裡接續（`resume_mode: "inject"`，限 kitty）
+
+預設的 `session`／`handoff` 都是**背景 headless 復活**——你的原 TUI 完全無感，只有一則通知，容易讓你
+以為沒接續而手動重開、兩個 session 互踩。`inject` 把復活**打回你正在看的那個 kitty 視窗**：reset 後
+checker 不自己跑 claude，而是用 kitty remote control 把 `resume_prompt` ＋ Enter `send-text` 進原視窗，
+就像你自己打字一樣，接續直接發生在眼前、隨時能接手。
+
+原理：StopFailure hook 跑在被中斷 session 的行程樹裡，kitty 已把 `KITTY_WINDOW_ID` 和 `KITTY_LISTEN_ON`
+匯進那個環境——hook 把這兩個值存進佇列，checker 之後就靠 `kitty @ --to <listen> send-text --match
+id:<window>` 精準打回同一個視窗（走 unix socket，不碰 AppleScript／TCC）。
+
+**前置（一次）**：
+
+1. `~/.config/kitty/kitty.conf` 開遠端控制（socket-only 較安全）：
+   ```
+   allow_remote_control socket-only
+   listen_on unix:/tmp/kitty
+   ```
+2. **完全結束 kitty 再重開**——socket 與 `KITTY_LISTEN_ON` 只對「開啟遠端控制之後新開的視窗」生效。
+3. `~/.claude/autocontinue/config.json` 設 `"resume_mode": "inject"`，並重跑 `install.sh` 把新版腳本
+   複製到 `~/.claude/autocontinue/bin/`。
+
+**取捨／限制**：
+
+- 注入是「打完就忘」——復活在你的 TUI 裡跑，checker 看不到它的結束，所以不像 `session` 模式那樣
+  自動判定 done／failed。若它**再次撞 limit**，hook 會把同一條佇列 entry 翻回 `waiting`、累計 attempts
+  （停損照常）；若它正常跑完，entry 會停在 `injected`，超過 `inject_ttl_sec`（預設 6h）才被當成完成搬進
+  `done/`。
+- 只認 **kitty**、且原視窗必須**還開著、claude 還活著且停在輸入提示**。任一條件不成立（視窗關了、用了
+  別的終端機、socket 連不上），checker 會自動**退回 headless `session` 復活**，工作不會掉。
+- 送出靠 `send-text` 的結尾 CR（`\r`）。若你的 claude TUI 沒被這個 Enter 觸發送出，看 `checker.log` 的
+  `injected … (rc=…)` 行確認有送到，再回頭調。
+
 ## 安裝 / 移除
 
 ```bash
@@ -51,7 +84,7 @@ reset 常在數小時後才發生，那時 prompt cache 早已過期（預設 5 
 | 路徑 | 用途 |
 |---|---|
 | `~/.claude/autocontinue/queue/` | 待復活佇列（每 session 一檔） |
-| `~/.claude/autocontinue/config.json` | 可調參數：`max_attempts`、`min_retry_wait_sec`、`resume_buffer_sec`、`resume_prompt`、`resume_model`、`resume_mode`、`handoff_prompt`、`notify` |
+| `~/.claude/autocontinue/config.json` | 可調參數：`max_attempts`、`min_retry_wait_sec`、`resume_buffer_sec`、`resume_prompt`、`resume_model`、`resume_mode`（`session`／`handoff`／`inject`）、`handoff_prompt`、`kitty_bin`、`inject_ttl_sec`、`notify` |
 | `~/.claude/autocontinue/logs/sessions/` | 每條鏈的 claude 輸出 |
 | `~/.claude/autocontinue/logs/hook.log`、`checker.log` | 事件紀錄 |
 | `~/.claude/autocontinue/logs/stopfailure-raw.jsonl` | StopFailure 原始 payload（校準解析用） |
