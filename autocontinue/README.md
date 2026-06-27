@@ -37,6 +37,33 @@ reset 常在數小時後才發生，那時 prompt cache 早已過期（預設 5 
 
 兩者可疊加（handoff 的新 session 也跑 `resume_model`）。改完 `config.json` 直接生效，不必重裝。
 
+## 就地接續（`inject` 模式，kitty 限定）
+
+`resume_mode` 還有第三個值 **`"inject"`**：reset 後**不**自己在背景 headless 跑 claude，而是把 `resume_prompt`
+直接「打」回你原本盯著的那個 **kitty 視窗**的 Claude TUI，讓接續**可見、就地**發生，你隨時能接手。
+
+```
+checker 偵測到 reset 已過
+  └─ entry 有 kitty_listen_on + kitty_window_id 且該視窗仍開著（kitty @ ls 確認）
+       └─ kitty @ send-text <resume_prompt>   ← 把字打進輸入框
+          kitty @ send-key  enter             ← 獨立的 Enter 事件才會送出
+```
+
+重點機制與前提：
+
+- StopFailure hook 跑在被限流 session 的 process tree 裡，kitty 早已把 `KITTY_WINDOW_ID` + `KITTY_LISTEN_ON`
+  匯出到環境，hook 把兩者存進 queue entry；checker 之後就靠 `kitty @ --to <listen>` 走 kitty 的 unix socket
+  鎖定那個視窗（不碰 AppleScript／TCC）。
+- **提交一定要用獨立的 `send-key enter`**，不能把 `\r` 黏在 `send-text` 文字尾端：那串會被當成一次 paste，
+  Claude Code 的 Ink TUI 把 paste 裡的換行當「插入一行」而非「按 Enter」，prompt 會卡在輸入框不送出——
+  而 `send-text` 照樣回 `rc=0`，checker 會誤記成功。所以實作是先 `send-text` 文字、停 0.4 秒、再 `send-key enter`。
+- **前提**：`~/.config/kitty/kitty.conf` 要有 `allow_remote_control socket-only` 與 `listen_on unix:/tmp/kitty`，
+  而且**只有重啟 kitty 之後新開的視窗**才帶 `KITTY_LISTEN_ON`。沒有遠端控制、視窗已關、或在別的終端機開的
+  session → `can_inject` 失敗 → checker **自動退回 headless `session` 復活**，工作不會掉。
+- inject 跑在你的 TUI 裡，checker 看不到它的結束。再撞 limit 由 hook 把 entry 翻回 `waiting`（連鎖／停損照舊）；
+  正常跑完則 entry 停在 `injected`，到 `inject_ttl_sec`（預設 6 小時）才退役到 `done/`。
+- inject 模式下 `resume_model` 不適用（不是我們在起 claude）；要省成本請搭 `session`／`handoff`。
+
 ## 安裝 / 移除
 
 ```bash
@@ -51,7 +78,7 @@ reset 常在數小時後才發生，那時 prompt cache 早已過期（預設 5 
 | 路徑 | 用途 |
 |---|---|
 | `~/.claude/autocontinue/queue/` | 待復活佇列（每 session 一檔） |
-| `~/.claude/autocontinue/config.json` | 可調參數：`max_attempts`、`min_retry_wait_sec`、`resume_buffer_sec`、`resume_prompt`、`resume_model`、`resume_mode`、`handoff_prompt`、`notify` |
+| `~/.claude/autocontinue/config.json` | 可調參數：`max_attempts`、`min_retry_wait_sec`、`resume_buffer_sec`、`resume_prompt`、`resume_model`、`resume_mode`、`handoff_prompt`、`kitty_bin`、`inject_ttl_sec`、`notify` |
 | `~/.claude/autocontinue/logs/sessions/` | 每條鏈的 claude 輸出 |
 | `~/.claude/autocontinue/logs/hook.log`、`checker.log` | 事件紀錄 |
 | `~/.claude/autocontinue/logs/stopfailure-raw.jsonl` | StopFailure 原始 payload（校準解析用） |
@@ -79,6 +106,11 @@ reset 常在數小時後才發生，那時 prompt cache 早已過期（預設 5 
   下的舊 transcript，handoff 的 grep 回溯就會失效。
 - checker 對 resume run 不設 timeout：長任務可跑數小時，期間其他待復活 session 會排隊
   （序列化是刻意設計）。若懷疑卡死，看 `logs/sessions/` 對應 log。
+- `inject` 模式靠 kitty 遠端控制，限 kitty、且該視窗要在重啟 kitty 後新開（才有 `KITTY_LISTEN_ON`）。
+  注入只是把 `resume_prompt` 打進那個 TUI，所以那條 session 的權限模式仍由它自己決定（與 headless
+  復活的「不升權」無關）。提交用獨立的 `send-key enter`——若日後 kitty 改了 send-key 語法、或 Claude Code
+  改了 paste／Enter 的處理，注入可能又卡在輸入框不送出：對照 `checker.log` 的 `injected ... (rc=0)` 與
+  該視窗 `kitty @ get-text` 的畫面即可確認。前提不滿足時 checker 一律退回 `session` 復活。
 
 ## 疑難排解
 

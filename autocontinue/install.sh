@@ -90,3 +90,17 @@ launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "launchd agent loaded: $LABEL (checks every 5 min)"
 echo "done. queue: $BASE/queue  logs: $BASE/logs"
+
+# Default resume_mode is "session" (headless). Optional "inject" mode types the
+# resume prompt straight back into the original kitty window; it needs kitty
+# remote control, which this installer can't enable for you.
+if [ "$(uname)" = "Darwin" ] && [ -d "/Applications/kitty.app" ]; then
+  echo
+  echo "tip: to use resume_mode \"inject\" (resume visibly in your kitty window),"
+  echo "     add to ~/.config/kitty/kitty.conf, then fully restart kitty:"
+  echo "         allow_remote_control socket-only"
+  echo "         listen_on unix:/tmp/kitty"
+  echo "     and set \"resume_mode\": \"inject\" in $BASE/config.json"
+  echo "     (only windows opened after the restart can be injected into;"
+  echo "      otherwise autocontinue falls back to a headless session resume)."
+fi
