@@ -31,6 +31,12 @@ DEFAULT_CONFIG = {
     #   pointer to the original transcript instead of replaying it; the new (small)
     #   session is then resumed normally on any later revival. Cheaper, but the
     #   fresh session only knows what it reads back from the transcript on demand.
+    # "inject": don't run claude ourselves at all — type the resume prompt
+    #   straight into the *original kitty window* (the TUI you were watching) via
+    #   kitty remote control, so the resume happens visibly, in place, where you
+    #   can take over. Requires kitty with `allow_remote_control` + `listen_on`
+    #   enabled and that window still open; otherwise it transparently falls back
+    #   to a headless "session" resume so the work is never dropped.
     "resume_mode": "session",
     "resume_prompt": (
         "你剛才因為 usage limit 而中斷，現在額度已重置。"
@@ -45,6 +51,12 @@ DEFAULT_CONFIG = {
         "需要更早的脈絡（某個決策的理由、先前讀過的檔案內容）時，再針對性地 grep 那個檔案，"
         "不要整份讀進來。接著從中斷處繼續完成原本的任務；若其實已完成，確認狀態後即可結束。"
     ),
+    # resume_mode "inject" only: path to the kitty binary used for remote control.
+    "kitty_bin": "kitty",
+    # resume_mode "inject" only: an injected resume runs in your TUI where we
+    # can't watch its exit, so an injected entry that never re-hits the limit is
+    # assumed finished after this many seconds (default 6h) and retired to done/.
+    "inject_ttl_sec": 21600,
     "notify": True,
 }
 

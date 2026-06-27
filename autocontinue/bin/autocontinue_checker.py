@@ -8,6 +8,7 @@ session's original permission mode and AUTOCONTINUE_ROOT exported, so a
 repeat rate limit inside the resumed run re-queues the same root entry
 (with its attempt count) via the StopFailure hook.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -81,6 +82,110 @@ def resolve_claude(cfg):
         ]
     )
     return shutil.which(binary, path=search)
+
+
+def resolve_kitty(cfg):
+    binary = cfg.get("kitty_bin", "kitty")
+    if os.path.sep in binary:
+        return binary if os.path.exists(binary) else None
+    search = ":".join(
+        [
+            os.environ.get("PATH", ""),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/Applications/kitty.app/Contents/MacOS",
+            os.path.expanduser("~/.local/bin"),
+        ]
+    )
+    found = shutil.which(binary, path=search)
+    if found:
+        return found
+    fallback = "/Applications/kitty.app/Contents/MacOS/kitty"
+    return fallback if os.path.exists(fallback) else None
+
+
+def kitty_window_alive(kitty_bin, listen, win):
+    """True iff window id `win` still exists in the kitty instance at `listen`.
+
+    `send-text` always reports success even when no window matched, so we must
+    confirm the target window is still open before relying on injection.
+    """
+    try:
+        out = subprocess.run(
+            [kitty_bin, "@", "--to", listen, "ls"],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        return False
+    if out.returncode != 0:
+        return False
+    try:
+        data = json.loads(out.stdout.decode("utf-8", "replace"))
+    except (ValueError, AttributeError):
+        return False
+    for osw in data:
+        for tab in osw.get("tabs", []):
+            for w in tab.get("windows", []):
+                if str(w.get("id")) == str(win):
+                    return True
+    return False
+
+
+def can_inject(entry, cfg, kitty_bin):
+    return bool(
+        cfg.get("resume_mode") == "inject"
+        and kitty_bin
+        and entry.get("kitty_listen_on")
+        and entry.get("kitty_window_id")
+        and kitty_window_alive(
+            kitty_bin, entry["kitty_listen_on"], entry["kitty_window_id"]
+        )
+    )
+
+
+def inject_resume(entry, cfg, kitty_bin):
+    """Type the resume prompt into the session's original kitty window, then
+    submit it with a separate Enter key event.
+
+    A trailing CR bundled into send-text is delivered as part of the same paste
+    burst, and Claude Code's TUI treats a newline inside a paste as "insert a
+    line", not "submit" -- so the prompt lands in the input box but never runs.
+    We send the text (newlines flattened so it can't break early), then issue a
+    distinct `send-key enter` so the TUI sees a real Return keypress.
+    """
+    listen = entry["kitty_listen_on"]
+    match = "id:%s" % entry["kitty_window_id"]
+    prompt = (cfg.get("resume_prompt") or "").replace("\r", " ").replace("\n", " ")
+    base = [kitty_bin, "@", "--to", listen]
+    try:
+        rc = subprocess.call(
+            base + ["send-text", "--match", match, prompt],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if rc != 0:
+            return rc
+        # Let the paste settle before the Return, so they aren't coalesced.
+        time.sleep(0.4)
+        return subprocess.call(
+            base + ["send-key", "--match", match, "enter"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return 1
+
+
+def gc_injected(cfg):
+    """Retire injected entries that never re-hit the limit (assumed finished).
+
+    An inject runs in the user's TUI, so we never see its exit. If it had
+    re-limited, the hook would have flipped the entry back to 'waiting'; an
+    entry still 'injected' past the TTL is treated as done."""
+    ttl = cfg.get("inject_ttl_sec", 21600)
+    now = time.time()
+    for path, entry in scan_entries():
+        if entry.get("status") == "injected" and now - entry.get("injected_at", 0) > ttl:
+            retire(path, entry, "done", ac.DONE_DIR)
+            ac.log("checker", "injected %s assumed done after ttl" % entry["root_id"])
 
 
 def scan_entries():
@@ -170,6 +275,7 @@ def main():
         return 0
     try:
         recover_stale_running()
+        gc_injected(cfg)
         while True:
             now = time.time()
             actionable = [
@@ -193,9 +299,43 @@ def main():
                 continue
 
             claude_bin = resolve_claude(cfg)
-            if not claude_bin:
+            kitty_bin = resolve_kitty(cfg) if cfg.get("resume_mode") == "inject" else None
+            inject = can_inject(entry, cfg, kitty_bin)
+
+            if not inject and not claude_bin:
                 ac.log("checker", "claude binary not found (%s); will retry next tick" % cfg["claude_bin"])
                 break
+
+            # Inject mode: type the resume prompt into the original kitty window
+            # instead of running claude ourselves. Fire-and-forget — the resume
+            # then runs visibly in the user's TUI; a repeat limit re-queues this
+            # same entry via the hook, and gc_injected retires it after the TTL.
+            if inject:
+                entry["attempts"] += 1
+                entry["status"] = "injected"
+                entry["last_attempt_at"] = now
+                entry["injected_at"] = now
+                ac.write_entry(path, entry)
+                ac.notify(
+                    cfg,
+                    "Autocontinue 復活",
+                    "%s：第 %d/%d 次（注入原 kitty 視窗）"
+                    % (project, entry["attempts"], cfg["max_attempts"]),
+                )
+                rc = inject_resume(entry, cfg, kitty_bin)
+                ac.log(
+                    "checker",
+                    "injected %s attempt %d into kitty window %s (rc=%d)"
+                    % (entry["root_id"], entry["attempts"], entry.get("kitty_window_id"), rc),
+                )
+                continue
+
+            if cfg.get("resume_mode") == "inject":
+                ac.log(
+                    "checker",
+                    "inject unavailable for %s (no live kitty window); "
+                    "falling back to headless resume" % entry["root_id"],
+                )
 
             # Handoff mode escapes the giant transcript exactly once: the first
             # revival starts a fresh session pointed at the transcript; the hook
