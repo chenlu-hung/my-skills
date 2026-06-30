@@ -18,6 +18,7 @@ Not a skill, but lives here too:
 | Tool | Purpose |
 |---|---|
 | [`autocontinue`](./autocontinue) | Auto-resumes a Claude Code session after a usage-limit reset. A `StopFailure` hook queues the interrupted session; a launchd agent (every 5 min) resumes it headlessly once the limit resets, reusing the original permission mode and stopping after a configurable chain limit. Install once via `autocontinue/install.sh` — applies to all sessions. macOS only. |
+| [`action`](./action) | The proactive sibling of `autocontinue` (and a skill): schedules a Claude Code task to start at an **absolute wall-clock time** and run headless/unattended, so heavy or batch work lands in an off-peak window and spreads load across the rolling usage limits. `action add --at 3am --cwd ~/proj "<prompt>"` queues a job; a launchd agent (every 5 min) launches `claude -p` once its start time passes. Composes with `autocontinue` (a scheduled run that hits a limit is resumed after reset). Install via `action/install.sh`. macOS only. |
 
 ## How `handoff` + `project-map` compose
 
