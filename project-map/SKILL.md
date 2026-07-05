@@ -50,7 +50,11 @@ yields zero symbols, the script prints a warning to stderr so the gap isn't sile
 3. **For each listed module:** open `.projectmap/modules/<name>.md`. Use its
    `## Public symbols` and `## Dependencies` lists to decide which files to actually read
    — don't read the whole module blindly. Replace the `## Summary` TODO with **≈3 sentences**:
-   what the module does, why it exists, its role in the architecture.
+   what the module does, why it exists, its role in the architecture. Match this size and
+   register — no headings, no lists, no restating the symbol table:
+   > Parses CLI flags and config files into a single validated `Settings` object.
+   > Exists so no other module touches raw argv or the config format. Every entry
+   > point calls it first; everything downstream consumes `Settings` only.
 4. **Update that module's one-liner** in the `## Modules` table of `.projectmap/ARCHITECTURE.md`.
 5. **On first build**, also fill the remaining TODOs in `ARCHITECTURE.md`: `## Overview`,
    `## Entry points` (verify the auto-detected list), and `## Conventions`.

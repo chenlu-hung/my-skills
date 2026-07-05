@@ -2,6 +2,8 @@
 
 Personal collection of [Claude Code](https://claude.com/claude-code) Agent Skills.
 
+**Design principle — model-robust by construction.** These skills are written to degrade gracefully on smaller driving models (e.g. Opus instead of Fable): taste-based judgment is replaced with explicit decision tests and thresholds, multi-step workflows carry non-skippable ordered checklists and literal output templates, and anything a script can do deterministically (shuffling/anonymizing council answers, indexing, change detection) lives in a script instead of a prompt.
+
 | Skill | Purpose |
 |---|---|
 | [`handoff`](./handoff) | Context transfer between AI coding sessions — creates a compact handoff doc so a fresh agent can resume. Includes a SessionStart hook (`check-handoff.sh`) that auto-detects handoff files. Integrates with `project-map` (below) to keep docs lean and cut resume-time exploration. |

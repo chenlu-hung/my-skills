@@ -7,9 +7,14 @@ description: Interview the user relentlessly about a plan or design until reachi
 
 Interview me to pin down this plan, walking the design tree and settling upstream decisions before the ones that depend on them, so we never reopen a closed branch.
 
-**Only ask load-bearing questions.** A question earns a slot only if its answer changes what gets built downstream. If a question has an obvious default, don't ask it — state the default in one line and move on. If the codebase can answer it, go read the codebase instead of asking. Relentless means thorough on what matters, not exhaustive on everything.
+**Only ask load-bearing questions.** Before asking anything, run it through this three-part test — a question earns a slot only if **all three** hold:
+1. The answer changes what gets built downstream (if every answer leads to the same build, drop it).
+2. The codebase can't answer it (if it can, go read the codebase instead of asking).
+3. There's no obvious default (if there is, state the default in one line and move on — don't ask).
 
-**Never repeat yourself.** Keep a running list of what's already resolved (and what each answer implies). Before asking, check the question isn't a restatement of a settled branch, isn't already answered by a prior choice, and isn't two phrasings of the same decision. When in doubt, infer from what I've said rather than re-asking.
+Relentless means thorough on what matters, not exhaustive on everything. If a whole round of candidate questions fails the test, the grilling is done — go write the decision log.
+
+**Never repeat yourself.** Maintain a running decision log, one line per settled decision: `#N <decision>: <answer> (implies: <what this forecloses or forces>)`. Before asking, scan the log: skip anything that restates a settled branch, is already implied by a prior choice, or is a second phrasing of the same decision. When in doubt, infer from what I've said rather than re-asking.
 
 **Batch related decisions.** When several discrete decisions sit at the same level and don't depend on each other, ask them together in one `AskUserQuestion` call (up to 4) rather than drip-feeding near-duplicates. Reserve one-at-a-time for genuine dependencies, where my answer steers the next question.
 

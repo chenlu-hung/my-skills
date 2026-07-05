@@ -16,6 +16,10 @@ Usage:
     python3 council.py --prompt-file q.txt                 # all members
     python3 council.py --members codex,claude --prompt "..."   # a subset
     echo "question" | python3 council.py                   # prompt via stdin
+    python3 council.py --anonymize stage1.json --question-file q.txt
+        # no dispatch: shuffle + relabel the stage-1 answers deterministically,
+        # write review_prompt.txt (self-contained cross-review prompt) and
+        # label_map.json (private label→member mapping) next to stage1.json
 
 Output: JSON on stdout:
     {"members": {"codex": {ok, answer, model, elapsed_s, error}, "gemini": {...}}}
@@ -27,8 +31,10 @@ cannot touch the user's repo while answering.
 import argparse
 import json
 import os
+import random
 import re
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
@@ -163,6 +169,56 @@ def dispatch(name, prompt, model, timeout, workdir):
                 "error": f"{type(exc).__name__}: {exc}"}
 
 
+def anonymize(stage1_path, question_file):
+    """Turn a saved stage-1 JSON into a shuffled, relabelled cross-review prompt.
+
+    Doing the shuffle + labelling here (not in the orchestrating LLM) means the
+    label→member mapping never has to enter the chair's context before synthesis,
+    so it cannot leak into a reviewer prompt.
+    """
+    with open(stage1_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    with open(question_file, encoding="utf-8") as fh:
+        question = fh.read().strip()
+
+    members = data.get("members", {})
+    answered = [(m, (r.get("answer") or "").strip()) for m, r in members.items()
+                if r.get("ok") and (r.get("answer") or "").strip()]
+    dropouts = sorted(set(members) - {m for m, _ in answered})
+    if len(answered) < 2:
+        sys.exit("council.py: fewer than 2 usable answers — nothing to cross-review; "
+                 "skip Stage 2 and synthesize directly from the answers you have")
+    if len(answered) > len(string.ascii_uppercase):
+        sys.exit("council.py: too many answers to label A–Z")
+
+    random.shuffle(answered)
+    labels = string.ascii_uppercase[: len(answered)]
+    mapping = {labels[i]: m for i, (m, _) in enumerate(answered)}
+
+    blocks = "\n\n".join(f"--- Response {labels[i]} ---\n{a}" for i, (_, a) in enumerate(answered))
+    prompt = (
+        f"Question: {question}\n\n"
+        "Below are anonymous responses to this question. Evaluate each for correctness,\n"
+        "depth, and usefulness, then rank them best-to-worst with a one-line justification\n"
+        "each. If a response contains a specific factual or correctness error, quote the\n"
+        "erroneous claim and say why it is wrong.\n\n"
+        f"{blocks}\n"
+    )
+
+    outdir = os.path.dirname(os.path.abspath(stage1_path))
+    prompt_path = os.path.join(outdir, "review_prompt.txt")
+    map_path = os.path.join(outdir, "label_map.json")
+    with open(prompt_path, "w", encoding="utf-8") as fh:
+        fh.write(prompt)
+    with open(map_path, "w", encoding="utf-8") as fh:
+        json.dump(mapping, fh, ensure_ascii=False, indent=2)
+
+    json.dump({"review_prompt": prompt_path, "label_map": map_path,
+               "responses": len(answered), "dropouts": dropouts},
+              sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+
+
 def read_prompt(args):
     if args.prompt is not None:
         return args.prompt
@@ -185,7 +241,16 @@ def main():
     ap.add_argument("--codex-model", default=DEFAULT_CODEX_MODEL, help="Codex model (empty = subscription default)")
     ap.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL, help="Claude model (empty = subscription default)")
     ap.add_argument("--opencode-model", default=DEFAULT_OPENCODE_MODEL, help="opencode model as provider/model")
+    ap.add_argument("--anonymize", metavar="STAGE1_JSON",
+                    help="don't dispatch; build an anonymized cross-review prompt from a saved stage-1 JSON")
+    ap.add_argument("--question-file", help="original question file (required with --anonymize)")
     args = ap.parse_args()
+
+    if args.anonymize:
+        if not args.question_file:
+            sys.exit("council.py: --anonymize requires --question-file")
+        anonymize(args.anonymize, args.question_file)
+        return
 
     members = [m.strip() for m in args.members.split(",") if m.strip()]
     unknown = [m for m in members if m not in RUNNERS]

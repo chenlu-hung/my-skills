@@ -40,7 +40,9 @@ DEFAULT_CONFIG = {
     "resume_mode": "session",
     "resume_prompt": (
         "你剛才因為 usage limit 而中斷，現在額度已重置。"
-        "請從上次的進度繼續完成原本的任務；若任務其實已完成，確認狀態後即可結束。"
+        "請從上次的進度繼續完成原本的任務。動手前先用可驗證的狀態確認實際進度"
+        "（git status／log、todo 清單、剛才的輸出），不要重做已完成的部分；"
+        "若任務其實已完成，確認狀態後據實回報即可結束，不要另起新工作。"
     ),
     # Seed prompt for handoff mode. {transcript_path} is substituted (via
     # str.replace, so stray braces in a customised prompt are harmless).

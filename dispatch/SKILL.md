@@ -12,6 +12,12 @@ what they produced. Sibling of `llm-council` (same CLIs, same subscription auth)
 but where the council *answers a question read-only*, dispatch *does work with
 write access* — so isolation and review are the core of the skill.
 
+**Every run walks all six steps, in order — no step is optional:**
+1 brief → 2 isolate → 3 run → 4 **verify** → 5 merge + **clean up** → 6 report.
+The two easiest to skip under time pressure (4 and the cleanup half of 5) are the
+two that exist to protect the user's tree. Skipping them is a failed dispatch even
+if the code happens to be fine.
+
 ## Workers
 
 | Worker | Reached via | Write mode | Auth (subscription / sign-in, not API key) |
@@ -83,14 +89,18 @@ big jobs. Tell the user up front that workers run for minutes, not seconds.
 
 Workers run with auto-approved permissions; their self-report is not evidence.
 For each task, the JSON includes `git.changed_files` and `git.shortstat` — what
-actually changed. Then:
+actually changed. Before merging **any** task, confirm all three, and if one
+fails, fix or re-dispatch — never "merge anyway":
 
-1. Read the diff (`git -C <dir> diff`) and check it matches the brief — no scope
-   creep, no deleted tests, no stray files.
-2. Run the project's tests/build against the worker's tree.
-3. If a worker failed or did poor work: fix it yourself if small, or re-dispatch
-   with a sharpened brief. A worker with `ok: false` (CLI missing, timeout) just
-   means you do that task yourself or reassign it — surface it, don't hide it.
+1. **Diff matches brief** — read `git -C <dir> diff`: no scope creep, no deleted
+   or weakened tests, no stray/generated files, nothing outside the paths the
+   brief named.
+2. **Tests/build pass** — run the project's tests/build against the worker's
+   tree and paste the actual result into your report (a claim without the
+   command output doesn't count).
+3. **Failures surfaced** — a worker with `ok: false` (CLI missing, timeout) or
+   poor output means you do that task yourself or re-dispatch with a sharpened
+   brief; say so explicitly, don't hide it.
 
 ### 5. Merge and clean up
 
@@ -100,8 +110,16 @@ changes), then remove the worktree and branch:
 ```sh
 git -C <repo> worktree remove <wt-dir> --force && git -C <repo> branch -D dispatch/<id>
 ```
-Close with a summary: per task — worker, what changed (files/stats), verification
-result, and anything you fixed or rejected.
+After merging or rejecting, confirm nothing is left: `git -C <repo> worktree list`
+should show only the main tree, and `<repo>.dispatch/` should be gone.
+
+### 6. Report
+
+Close with one line per task, in exactly this shape:
+
+```
+<id> — <worker> | changed: <shortstat> | verify: <test command → pass/fail> | merged: <yes: how / no: why> | fixed/rejected: <what, or —>
+```
 
 ## Requirements
 

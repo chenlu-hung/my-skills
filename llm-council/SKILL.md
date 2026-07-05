@@ -46,11 +46,12 @@ all four members; pass `--members` to use a subset.
 
 ### Stage 1 — First opinions (fan-out)
 
-Write the question to a temp file, then dispatch **all** members in parallel:
+Write the question to a temp file, then dispatch **all** members in parallel, saving the
+JSON to a file (Stage 2's anonymizer reads it from disk):
 ```sh
-python3 ~/.claude/skills/llm-council/council.py --prompt-file <q.txt>
+python3 ~/.claude/skills/llm-council/council.py --prompt-file <tmp>/q.txt > <tmp>/stage1.json
 ```
-Parse the JSON (`members.<name>.answer`). If a member has `ok: false`, note who dropped out
+Check `members.<name>.ok` in the JSON. If a member has `ok: false`, note who dropped out
 (e.g. CLI not installed / not signed in) and continue with whoever answered. You do **not**
 add your own answer here — the `claude` member already represents Claude independently.
 
@@ -58,26 +59,19 @@ You now hold one answer per member.
 
 ### Stage 2 — Cross-review & ranking (skip in `quick`)
 
-1. **Anonymize**: shuffle the answers and relabel them `Response A / B / C / …` (one label per
-   member that answered). Keep the label→member mapping private — reviewers must never know
-   which model wrote which answer.
-2. Build a self-contained review prompt and dispatch it to the members:
-   ```
-   Question: <original question>
-
-   Below are the anonymous responses. Evaluate each for correctness, depth, and
-   usefulness, then rank them best-to-worst with a one-line justification each.
-
-   --- Response A ---
-   <answer>
-   --- Response B ---
-   <answer>
-   --- Response C ---
-   <answer>
-   ... (one block per member)
-   ```
+1. **Anonymize with the script — never shuffle or relabel by hand:**
    ```sh
-   python3 ~/.claude/skills/llm-council/council.py --prompt-file <review.txt>
+   python3 ~/.claude/skills/llm-council/council.py --anonymize <tmp>/stage1.json --question-file <tmp>/q.txt
+   ```
+   It shuffles the usable answers, labels them `Response A / B / C / …`, and writes two
+   files next to `stage1.json`: `review_prompt.txt` (the complete, self-contained review
+   prompt) and `label_map.json` (the private label→member mapping). With fewer than 2
+   usable answers it refuses and tells you to skip straight to Stage 3.
+   **Do not open `label_map.json` until Stage 3**, and never include it (or any member
+   name) in anything sent to a member.
+2. Dispatch the generated review prompt as-is:
+   ```sh
+   python3 ~/.claude/skills/llm-council/council.py --prompt-file <tmp>/review_prompt.txt > <tmp>/stage2.json
    ```
 
 You now hold one ranking per member, all over the same anonymized set.
@@ -89,16 +83,16 @@ change anything** — not a free-for-all that grinds the answers into mush. Open
 questions are exactly where extra debate rounds make models converge toward whoever
 sounds most confident rather than whoever is right, so this stays surgical.
 
-1. **Gate — is there substantive disagreement?** From the Stage-2 rankings, check for
-   *either*:
-   - the rankings **conflict** (members put different answers at the top, not just reorder
-     the middle), or
-   - a reviewer flagged a **correctness/factual dispute** about a specific answer (not a
-     style or "I'd phrase it differently" preference).
+1. **Gate — answer these two questions first, in writing, quoting the evidence:**
+   - **Q1**: Do the reviewers' *top picks* differ? (Reordering the middle of the ranking
+     does not count — only a conflict about which answer is best.)
+   - **Q2**: Did any reviewer allege a **specific factual/correctness error** in a specific
+     answer? Quote the allegation. ("I'd phrase it differently" or style preferences do
+     not count.)
 
-   If neither holds — the council substantively **agrees** — **skip this stage**, say so in
-   one line ("council was in consensus; no rebuttal round needed"), and go straight to
-   Stage 3. Do not manufacture a debate.
+   If **both** answers are "no" — the council substantively **agrees** — **skip this
+   stage**, say so in one line ("council was in consensus; no rebuttal round needed"),
+   and go straight to Stage 3. Do not manufacture a debate.
 
 2. **One rebuttal round (contested answers only).** For each answer that drew a real
    objection, send it *back to its own author* with the strongest objection(s) raised
@@ -129,7 +123,7 @@ You now hold, for each contested answer, a defend-or-concede response.
 
 ### Stage 3 — Chairman synthesis (you)
 
-De-anonymize privately, then as **Chairman** write the final answer. You are *not* a contestant
+Now (and only now) read `label_map.json` to de-anonymize, then as **Chairman** write the final answer. You are *not* a contestant
 — weigh the rankings and the substance honestly and adopt any member's point when it's stronger;
 don't favour the `claude` member by default. In `debate` mode also weigh the Stage-2.5 round:
 a **conceded** point is settled (drop it from the answer), and a point that was **defended with
@@ -162,7 +156,9 @@ as `ok: false` and the council proceeds with the rest.
 
 ## Rules
 
-- **Anonymity is the point.** Never leak the A/B/C → member mapping into a reviewer's prompt;
+- **Anonymity is the point.** The `--anonymize` mode owns the shuffle and the labels —
+  never rebuild the review prompt by hand, never open `label_map.json` before Stage 3, and
+  never leak the A/B/C → member mapping (or any member name) into a member's prompt;
   it exists to strip brand bias from the rankings.
 - **Members only via `council.py`** — it runs each in a throwaway temp dir (codex additionally
   in a read-only sandbox; `claude` with `--setting-sources project`) so they can't touch the

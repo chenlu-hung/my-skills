@@ -63,6 +63,18 @@ Run the **Project map check** (below) first. If the map is missing or stale, **d
 
 **Quick mode**: keep only the goal, suggested skills, and 3-5 next steps.
 
+### Before saving — run every check
+
+1. Path is `$TMPDIR/claude-handoff-<YYYY-MM-DD-HHMM>.md` — temp dir, correct prefix, **not** the project workspace.
+2. First line is `<!-- HIGHLY SENSITIVE. Do not share this file. -->`.
+3. Scan the draft for secrets before writing it (then eyeball any hits — redact, don't just rename):
+   ```sh
+   grep -inE 'api[_-]?key|secret|token|passw(or)?d|bearer|BEGIN (RSA|OPENSSH)' <draft>
+   ```
+4. No section exceeds ~5 bullets; no pasted artifact content — pointers only.
+
+If any check fails, fix the draft first. A handoff that leaks a secret or lands in the repo is worse than no handoff.
+
 ## Resume Flow
 
 Triggered when the user confirms a resume — either after the SessionStart hook reports a handoff, or via `/handoff resume`:
