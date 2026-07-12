@@ -8,6 +8,7 @@ Personal collection of [Claude Code](https://claude.com/claude-code) Agent Skill
 |---|---|
 | [`handoff`](./handoff) | Context transfer between AI coding sessions — creates a compact handoff doc so a fresh agent can resume. Includes a SessionStart hook (`check-handoff.sh`) that auto-detects handoff files. Integrates with `project-map` (below) to keep docs lean and cut resume-time exploration. |
 | [`grill-me`](./grill-me) | Stress-tests a plan or design by interviewing you relentlessly until the decision tree is resolved. |
+| [`FableAdvisor`](./FableAdvisor) | Codifies the Anthropic-recommended architect/implementer split: Fable 5 (the session) runs `grill-me`'s interview, designs the architecture into a self-contained doc, then hands off to an **implementer subagent** (default Sonnet 5; overridable to opus/haiku, e.g. `/fable-advisor opus`) that implements against the doc and consults Fable (via `CONSULT` → SendMessage ruling) when blocked on design; Fable reviews the diff against the doc before closing. Installs as `fable-advisor`. |
 | [`caveman`](./caveman) | Ultra-compressed communication mode — cuts token usage ~75% while keeping technical accuracy. |
 | [`project-map`](./project-map) | Builds a committed, on-demand `.projectmap/` index (ctags symbols + short module summaries) so agents remember the codebase and grep the map instead of re-scanning the repo. Includes `build-map.py`; requires `universal-ctags`. |
 | [`llm-council`](./llm-council) | Convenes a multi-model council — Codex (ChatGPT sub), Gemini (Antigravity `agy`), Claude (`claude -p`), and DeepSeek (opencode, free) — to answer a question, cross-review each other anonymously, then this session chairs the synthesis. Inspired by [karpathy/llm-council](https://github.com/karpathy/llm-council); every member runs through its **own subscription/sign-in CLI**, no API keys. Includes `council.py` (parallel dispatch). |
@@ -40,5 +41,7 @@ cp -R handoff ~/.claude/skills/
 ```
 
 > **Note**: `handoff`'s SessionStart hook must be registered separately in `~/.claude/settings.json` and references `~/.claude/skills/handoff/check-handoff.sh`.
+>
+> **Note**: `FableAdvisor` installs under its skill name: `cp -R FableAdvisor ~/.claude/skills/fable-advisor`. It expects `grill-me` to be installed too (Phase 1 invokes it).
 >
 > **Note**: `dispatch`'s auto-dispatch layer (nudge hook + policy) installs via `dispatch/install.sh` — it copies the skill/hook/policy, registers the `UserPromptSubmit` hook in `~/.claude/settings.json`, and `@`-includes the policy from `~/.claude/CLAUDE.md`. Safe to re-run to update.
