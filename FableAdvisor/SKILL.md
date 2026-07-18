@@ -1,11 +1,11 @@
 ---
 name: fable-advisor
-description: Formalizes the Anthropic-recommended architect/implementer split — the strongest model (Fable 5, this session) grills the user via the grill-me skill, designs the architecture, and writes it to a self-contained doc; an implementer subagent (default Sonnet 5, overridable to opus/haiku via argument) then implements against that doc and consults the Fable advisor whenever it hits a design-level block; Fable reviews the final diff against the doc before closing. Use when the user says "fable advisor", "architect then implement", "design then hand to sonnet", "Fable 設計 sonnet 實作", "烤完設計架構交給 sonnet", "當我的架構顧問", or invokes /fable-advisor (optionally with a model argument, e.g. "/fable-advisor opus").
+description: Formalizes the Anthropic-recommended architect/implementer split — the strongest model (Fable 5, this session) grills the user via the grill-me skill, designs the architecture, and writes it to a self-contained doc; an implementer subagent (default Opus, overridable to sonnet/haiku via argument) then implements against that doc and consults the Fable advisor whenever it hits a design-level block; Fable reviews the final diff against the doc before closing. Use when the user says "fable advisor", "architect then implement", "design then hand to sonnet", "Fable 設計 sonnet 實作", "烤完設計架構交給 sonnet", "當我的架構顧問", or invokes /fable-advisor (optionally with a model argument, e.g. "/fable-advisor opus").
 ---
 
 # Fable Advisor — architect / implementer split
 
-Pattern: the strongest model interrogates the plan, designs the architecture, and stays on as **advisor**; **Sonnet 5** does the implementation against the written architecture doc, consulting the advisor on design-level blocks; the advisor reviews the result before closing.
+Pattern: the strongest model interrogates the plan, designs the architecture, and stays on as **advisor**; an implementer model (default **Opus**) does the implementation against the written architecture doc, consulting the advisor on design-level blocks; the advisor reviews the result before closing.
 
 **Role check (non-skippable):** this session is the Architect/Advisor. If the session model is not the strongest available (e.g. already Sonnet or Haiku), say so in one line and ask whether to continue anyway — the pattern's value is the capability gap between architect and implementer.
 
@@ -27,7 +27,7 @@ Show the user the doc path plus a ≤10-line summary, then proceed — don't wai
 
 ## Phase 3 — Handoff to the implementer
 
-**Implementer model (parameter):** default `sonnet`. Override when the user passes it as an argument (`/fable-advisor opus`) or says so in the request ("用 opus 實作", "implement with haiku") — accepted values are the Agent tool's model names: `sonnet`, `opus`, `haiku`. If the user names anything else, ask once instead of guessing. `fable` is not a valid implementer — it collapses the architect/implementer capability gap; if asked, point that out and suggest skipping this skill and implementing directly. Announce the choice in one line ("implementer: opus (user override)") before spawning.
+**Implementer model (parameter):** default `opus`. Override when the user passes it as an argument (`/fable-advisor sonnet`) or says so in the request ("用 sonnet 實作", "implement with haiku") — accepted values are the Agent tool's model names: `sonnet`, `opus`, `haiku`. If the user names anything else, ask once instead of guessing. `fable` is not a valid implementer — it collapses the architect/implementer capability gap; if asked, point that out and suggest skipping this skill and implementing directly. Announce the choice in one line ("implementer: opus (user override)") before spawning.
 
 Spawn the implementer with the **Agent tool**: `subagent_type: "general-purpose"`, `model: <implementer model>`, prompt = the **implementer brief template** in [templates.md](templates.md) with the blanks filled (the brief embeds the consult protocol). Background run is fine — completion re-invokes you.
 

@@ -51,7 +51,7 @@ Everything else — local naming, test phrasing, obvious idioms — the implemen
 
 ## 2. Implementer brief (Agent tool prompt)
 
-Spawn with `subagent_type: "general-purpose"`, `model: <implementer model>` (default `sonnet`; see SKILL.md Phase 3 for the override rule).
+Spawn with `subagent_type: "general-purpose"`, `model: <implementer model>` (default `opus`; see SKILL.md Phase 3 for the override rule).
 
 ```text
 You are the implementer for <feature>, working in <absolute repo path>.
