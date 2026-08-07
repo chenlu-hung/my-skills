@@ -59,7 +59,7 @@ BUNDLED_PARSERS = {
 EXTS = {
     ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".C", ".H",
     ".py", ".pyi", ".rs", ".swift",
-    ".go", ".java", ".js", ".jsx", ".ts", ".tsx", ".kt", ".rb", ".cs", ".m", ".mm",
+    ".go", ".java", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".kt", ".rb", ".cs", ".m", ".mm",
 }
 
 EXCLUDE_DIRS = {
@@ -218,6 +218,9 @@ def warn_empty_languages(root: Path, files, by_file) -> None:
 
 def run_ctags(root: Path, files, tags_path: Path, extra_options=None) -> None:
     cmd = ["ctags", *(extra_options or []),
+           # ctags doesn't map ES-module extensions to JavaScript by default, so
+           # `.mjs`/`.cjs` would index to zero symbols. Extend the language map.
+           "--map-JavaScript=+.mjs", "--map-JavaScript=+.cjs",
            "--excmd=number", "--fields=+K", "--sort=no", "-L", "-", "-f", str(tags_path)]
     proc = subprocess.run(cmd, input="\n".join(files), text=True, cwd=root, capture_output=True)
     if not tags_path.exists():
