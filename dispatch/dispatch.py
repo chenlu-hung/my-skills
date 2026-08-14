@@ -7,7 +7,8 @@ a worker. This script runs the workers concurrently and reports what they did.
 
 Adapted from llm-council/council.py, with three deliberate differences:
   1. each task goes to ONE assigned worker (council broadcasts one prompt to all)
-  2. workers get WRITE access to their task dir (council is read-only, temp dir)
+  2. workers get WRITE access to their task dir (council members are always read-only:
+     in a temp dir by default, or hardened read-only in a borrowed dir via --workdir)
   3. optional git-worktree isolation so parallel tasks on the same repo don't clash
 
 Workers authenticate through their own subscription / sign-in, not API keys:

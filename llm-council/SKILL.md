@@ -20,7 +20,8 @@ OpenRouter.
 | **Gemini** | Antigravity `agy -p` | Google Antigravity sign-in (Gemini models) |
 | **Claude** | `claude -p` | Claude subscription — runs as an **independent member**, isolated from the chair |
 
-All three members run **in parallel** through `council.py` (each in a throwaway temp dir).
+All three members run **in parallel** through `council.py`, each in a throwaway temp dir —
+this skill never passes `--workdir`, so no member can see the user's repo (see Rules).
 **This Claude Code session is the Chairman**: it only synthesizes — it does *not* also submit
 a member answer, because the `claude` member already carries Claude's independent voice (run
 with `--setting-sources project` so the session's hooks/memory don't leak into it). The CLIs
@@ -161,6 +162,10 @@ as `ok: false` and the council proceeds with the rest.
 - **Members only via `council.py`** — it runs each in a throwaway temp dir (codex additionally
   in a read-only sandbox; `claude` with `--setting-sources project`) so they can't touch the
   user's repo or inherit this session's hooks/memory while answering.
+- **Never pass `--workdir` from this skill.** That flag points members at a real directory so
+  they can read it; it exists for the `review-me` skill, where the answer depends on code the
+  prompt cannot carry. A council answer must come from the prompt alone — giving one member
+  repo access it did not need would make the answers incomparable and break the ranking.
 - **Self-contained prompts.** The CLIs keep no memory between calls, so each stage's prompt
   must carry everything it needs (the question, and the answers to review).
 - **`debate` stays surgical.** Stage 2.5 is *one* round and *only* runs on substantive
