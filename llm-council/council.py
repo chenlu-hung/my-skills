@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """council.py — dispatch one prompt to the external LLM-council members in parallel.
 
-Part of the `llm-council` Claude Code skill. Claude Code itself is the third member
-**and** the Chairman, so it answers directly; this script only drives the external
-CLIs (Codex, Antigravity) so they run concurrently with clean, parsed output.
+Part of the `llm-council` Claude Code skill. The orchestrating Claude Code session is
+the Chairman and does not answer; this script drives every member CLI — including a
+separate headless `claude` — so they run concurrently with clean, parsed output.
 
 Each member authenticates through its own *subscription / sign-in*, not an API key:
   - codex     -> OpenAI Codex CLI, signed in with a ChatGPT subscription (`codex exec`)
   - gemini    -> Google Antigravity CLI `agy`, Gemini models (`agy -p`)
   - claude    -> Claude Code headless (`claude -p`) — Claude as an independent member,
                  separate from the orchestrating session that chairs the council
-  - opencode  -> opencode CLI (`opencode run`), default model DeepSeek V4 Flash (free)
 
 Usage:
     python3 council.py --prompt-file q.txt                 # all members
@@ -45,8 +44,7 @@ DEFAULT_TIMEOUT = 300  # seconds, per member — matches agy's default --print-t
 DEFAULT_GEMINI_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_CODEX_MODEL = ""  # empty = whatever the ChatGPT subscription defaults to
 DEFAULT_CLAUDE_MODEL = ""  # empty = whatever the Claude subscription defaults to
-DEFAULT_OPENCODE_MODEL = "opencode/deepseek-v4-flash-free"  # free DeepSeek V4 Flash
-ALL_MEMBERS = "codex,gemini,claude,opencode"
+ALL_MEMBERS = "codex,gemini,claude"
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")  # strip terminal color codes from CLI stdout
 
@@ -118,40 +116,10 @@ def run_claude(prompt, model, timeout, workdir):
     return {"ok": ok, "answer": answer, "model": model or "default", "elapsed_s": elapsed, "error": err}
 
 
-def run_opencode(prompt, model, timeout, workdir):
-    """opencode `run` in JSON mode; the answer is the concatenation of `type:text` events."""
-    cmd = ["opencode", "run", "--format", "json"]
-    if model:
-        cmd += ["-m", model]
-    cmd.append(prompt)
-
-    t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=workdir)
-    elapsed = round(time.time() - t0, 1)
-
-    texts = []
-    for line in (proc.stdout or "").splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if obj.get("type") == "text":
-            chunk = (obj.get("part") or {}).get("text")
-            if chunk:
-                texts.append(chunk)
-    answer = "\n".join(texts).strip()
-    ok = bool(answer) and proc.returncode == 0
-    err = "" if ok else ((proc.stderr or "").strip()[-600:] or f"exit {proc.returncode}, empty answer")
-    return {"ok": ok, "answer": answer, "model": model or DEFAULT_OPENCODE_MODEL, "elapsed_s": elapsed, "error": err}
-
-
-RUNNERS = {"codex": run_codex, "gemini": run_gemini, "claude": run_claude, "opencode": run_opencode}
+RUNNERS = {"codex": run_codex, "gemini": run_gemini, "claude": run_claude}
 
 # CLI binary each member shells out to — used for the "not installed" error message.
-CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude", "opencode": "opencode"}
+CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude"}
 
 
 def dispatch(name, prompt, model, timeout, workdir):
@@ -240,7 +208,6 @@ def main():
     ap.add_argument("--gemini-model", default=DEFAULT_GEMINI_MODEL, help="Antigravity model name")
     ap.add_argument("--codex-model", default=DEFAULT_CODEX_MODEL, help="Codex model (empty = subscription default)")
     ap.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL, help="Claude model (empty = subscription default)")
-    ap.add_argument("--opencode-model", default=DEFAULT_OPENCODE_MODEL, help="opencode model as provider/model")
     ap.add_argument("--anonymize", metavar="STAGE1_JSON",
                     help="don't dispatch; build an anonymized cross-review prompt from a saved stage-1 JSON")
     ap.add_argument("--question-file", help="original question file (required with --anonymize)")
@@ -262,7 +229,6 @@ def main():
         "codex": args.codex_model,
         "gemini": args.gemini_model,
         "claude": args.claude_model,
-        "opencode": args.opencode_model,
     }
 
     workdir = tempfile.mkdtemp(prefix="llm-council-")

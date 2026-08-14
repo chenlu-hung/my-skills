@@ -1,6 +1,6 @@
 ---
 name: llm-council
-description: Convenes a multi-model "council" to answer a question, then synthesizes a single best answer — inspired by Karpathy's llm-council. Each member runs through its own subscription/sign-in CLI, not an API key: Codex (ChatGPT sub), Gemini (Antigravity `agy`), Claude (`claude -p`), and DeepSeek (opencode, free). This Claude Code session chairs the synthesis. Use when the user says "ask the council", "llm council", "convene the council", "second opinion", "what do other models think", "compare models on this", "ask codex and gemini too", "make the models debate", "have them cross-examine each other", or invokes "/llm-council".
+description: Convenes a multi-model "council" to answer a question, then synthesizes a single best answer — inspired by Karpathy's llm-council. Each member runs through its own subscription/sign-in CLI, not an API key: Codex (ChatGPT sub), Gemini (Antigravity `agy`), and Claude (`claude -p`). This Claude Code session chairs the synthesis. Use when the user says "ask the council", "llm council", "convene the council", "second opinion", "what do other models think", "compare models on this", "ask codex and gemini too", "make the models debate", "have them cross-examine each other", or invokes "/llm-council".
 argument-hint: "\"<question>\" | debate \"<question>\" | quick \"<question>\" | raw \"<question>\""
 ---
 
@@ -19,14 +19,13 @@ OpenRouter.
 | **Codex** | `codex exec` | ChatGPT subscription (`auth_mode: chatgpt` in `~/.codex/auth.json`) |
 | **Gemini** | Antigravity `agy -p` | Google Antigravity sign-in (Gemini models) |
 | **Claude** | `claude -p` | Claude subscription — runs as an **independent member**, isolated from the chair |
-| **DeepSeek** | opencode `run` | opencode sign-in — default `opencode/deepseek-v4-flash-free` (free) |
 
-All four members run **in parallel** through `council.py` (each in a throwaway temp dir).
+All three members run **in parallel** through `council.py` (each in a throwaway temp dir).
 **This Claude Code session is the Chairman**: it only synthesizes — it does *not* also submit
 a member answer, because the `claude` member already carries Claude's independent voice (run
 with `--setting-sources project` so the session's hooks/memory don't leak into it). The CLIs
 are stateless one-shot calls, so every prompt must be self-contained. `council.py` defaults to
-all four members; pass `--members` to use a subset.
+all three members; pass `--members` to use a subset.
 
 ## Modes
 
@@ -148,7 +147,6 @@ as `ok: false` and the council proceeds with the rest.
   `"auth_mode": "chatgpt"`; else `codex login`.
 - **`agy`** (Antigravity CLI) — signed in for Gemini models.
 - **`claude`** (Claude Code) — the same subscription as this session.
-- **`opencode`** — signed in (`opencode auth`); the default DeepSeek V4 Flash model is free.
 - **`python3`** (stdlib only).
 
 `council.py` degrades gracefully: a missing CLI, timeout, or crash becomes a per-member
