@@ -60,16 +60,36 @@ Reviewers must see the *same* code you are asking about.
 
 1. `git status --porcelain` — a dirty tree is fine (it is the default target), but do not edit
    files while a review is in flight.
-2. **Prefer reviewing from a committed tree.** The read-only guarantees are not equal: codex
+2. **Establish provenance before reviewing anything — do not skip this.** Go through the
+   changed paths and split them in two: work *this session* did, and everything else. Anything
+   that was already dirty when the session started, or that you cannot account for, is in the
+   second group — a different agent (a `/dispatch` worker, a Codex or Antigravity run), another
+   session, or the user's own editing.
+
+   For that second group, **stop and ask the user** what to do with it. Do not review it, do
+   not commit it, do not stage it, and do not fold it into a commit of your own work.
+
+   Two separate reasons, both real:
+   - **A dirty target produces dirty findings.** Reviewers cannot tell your change from
+     someone else's, so their omissions get attributed to you and the report loses focus.
+   - **Someone else's work is not yours to dispose of.** The code looking coherent is not
+     evidence the user wants it kept: a plausible, self-consistent diff from another agent is
+     exactly what a rejected attempt looks like. That judgment is the user's and you cannot
+     substitute a review for it — no reviewer model can tell you whether the user is satisfied
+     with work they commissioned elsewhere.
+
+   Normally the answer is to narrow the review with a pathspec (`git diff -- <your paths>`) so
+   the target is only what this session actually did.
+3. **Prefer reviewing from a committed tree.** The read-only guarantees are not equal: codex
    has an OS sandbox and claude has harness-level tool denial, but gemini only has `--mode
    plan`, a behavioural mode paired with `--dangerously-skip-permissions`. It held under test,
    but it is a promise rather than a wall. If there is uncommitted work you cannot afford to
    lose, commit (or stash) first, or drop gemini from `--members`.
-3. Write the review target to a temp file:
+4. Write the review target to a temp file:
    - `plan` mode → the plan text
    - `gap` / `quality` → `git diff <ref> > <tmp>/target.diff`
-4. If the diff is empty, stop and say so — there is nothing to review.
-5. **Check the diff size.** Prompts reach codex and gemini as command-line arguments, so the
+5. If the diff is empty, stop and say so — there is nothing to review.
+6. **Check the diff size.** Prompts reach codex and gemini as command-line arguments, so the
    whole prompt must fit in `ARG_MAX` (1MB on macOS) — that is roughly 20k diff lines. A diff
    anywhere near that is too big to review usefully anyway: split it by subsystem and run one
    review per part rather than truncating.
@@ -224,6 +244,10 @@ Three reasons, all load-bearing — do not "save a call" by merging them:
 
 - **Reviewers get the repo, not your summary** — hand-picked context reproduces your blind
   spot. Always pass `--workdir` with a real path.
+- **Review only what this session did.** Changes of unknown provenance get raised with the
+  user, never reviewed, committed, or absorbed into your work. This skill finds omissions; it
+  cannot tell you whether the user wants someone else's work kept, and a coherent-looking diff
+  is not evidence that they do.
 - **Verify every finding against the code before reporting it.** You are the filter; passing
   through unchecked claims makes the skill worse than useless.
 - **No rebuttal round in `plan`/`gap`.** Corroboration is a bonus, not a requirement.
