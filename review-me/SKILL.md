@@ -1,7 +1,7 @@
 ---
 name: review-me
-description: Sends your own plan, diff, or design out to independent external models (Codex, Gemini, optionally a fresh Claude) to find what you MISSED — the failure mode of a single strong model working alone. Reviewers read the real repo read-only, so they can catch omissions your prompt never mentioned. Three modes: `plan` (before coding), `gap` (after coding, find omissions), `quality` (architecture trade-offs, with a rebuttal round on genuine disagreement). Use when the user says "review me", "check my plan", "did I miss anything", "have codex review this", "second pair of eyes on this diff", "審一下有沒有漏", "看看我漏了什麼", "找遺漏", or invokes /review-me.
-argument-hint: "plan [<plan file>] | gap [<git ref>] | quality [<git ref>]"
+description: Sends your own plan, diff, or design out to independent external models (Codex, Gemini, optionally a fresh Claude) to find what you MISSED — the failure mode of a single strong model working alone. Reviewers read the real repo read-only, so they can catch omissions your prompt never mentioned. Four modes: `plan` (before coding), `gap` (after coding, find omissions), `quality` (architecture trade-offs, with a rebuttal round on genuine disagreement), `conform` (accept delegated work: check a worker's diff against the brief it was given, including whether its completion report is true). Use when the user says "review me", "check my plan", "did I miss anything", "have codex review this", "second pair of eyes on this diff", "審一下有沒有漏", "看看我漏了什麼", "找遺漏", "驗收", "codex 做的對不對", "有沒有照 brief 做", or invokes /review-me.
+argument-hint: "plan [<plan file>] | gap [<git ref>] | quality [<git ref>] | conform <brief file> [<git ref>]"
 ---
 
 # Review Me
@@ -29,10 +29,15 @@ via `--workdir`, name the files and commands to look at, and let them read.
 | `/review-me plan [<file>]` | A plan, before any code is written | Omissions in the plan |
 | `/review-me gap [<ref>]` | A diff, after coding | Omissions in the implementation |
 | `/review-me quality [<ref>]` | The same diff | Architecture trade-offs, disagreements adjudicated |
+| `/review-me conform <brief> [<ref>]` | Work done by a *delegated worker*, against its brief | Deviations from the brief |
 
 `<ref>` defaults to the uncommitted working tree; accepts anything `git diff` takes
 (`HEAD~1`, `main...HEAD`, a path). If no plan file is given in `plan` mode, use the plan
 under discussion in the current conversation — write it to a temp file first.
+
+The first three modes review **your own** work. `conform` reviews **someone else's** —
+a `/dispatch` worker, a Codex or Antigravity run, a subagent — and asks a narrower, purely
+factual question: did they do what they were told?
 
 **Run `gap` before `quality`.** Fixing omissions changes the code, which invalidates quality
 comments written against the old version. Never run both in one call — see *Why the modes are
@@ -51,6 +56,12 @@ Defaults to `codex,gemini`. The user may add `claude` — but know what it buys:
 
 Pass `--members` to change the roster. A member whose CLI is missing comes back `ok: false`;
 carry on with the rest and say who dropped out.
+
+**In `conform` mode, exclude the worker that did the work.** If codex implemented it, review
+with `--members gemini,claude`. A worker checking its own output against its own brief will
+reproduce whatever misreading of the brief caused the deviation, and it has an obvious stake
+in the verdict. This is not optional and there is no roster where a single model both
+implements and accepts.
 
 ## Workflow
 
@@ -80,6 +91,11 @@ Reviewers must see the *same* code you are asking about.
 
    Normally the answer is to narrow the review with a pathspec (`git diff -- <your paths>`) so
    the target is only what this session actually did.
+
+   **The one exception is `conform` mode**, which exists precisely to review delegated work —
+   but only when you have the brief that work was given. No brief, no `conform`: without a
+   standard to measure against you are back to judging whether the code "looks right", which
+   is the user's call. In that case ask; do not review.
 3. **Prefer reviewing from a committed tree.** The read-only guarantees are not equal: codex
    has an OS sandbox and claude has harness-level tool denial, but gemini only has `--mode
    plan`, a behavioural mode paired with `--dangerously-skip-permissions`. It held under test,
@@ -88,6 +104,12 @@ Reviewers must see the *same* code you are asking about.
 4. Write the review target to a temp file:
    - `plan` mode → the plan text
    - `gap` / `quality` → `git diff <ref> > <tmp>/target.diff`
+   - `conform` → the same diff, **plus** the brief the worker was given and its completion
+     report if it produced one. Use the brief **as issued, verbatim** — not your summary of
+     it, and not a version you tidied up. If you rewrite the standard, deviations caused by an
+     ambiguous brief silently become the worker's fault, and a brief that was genuinely
+     unclear is a finding the user needs. If you cannot find the brief as issued, say so and
+     stop; do not reconstruct it from memory.
 5. If the diff is empty, stop and say so — there is nothing to review.
 6. **Check the diff size.** Prompts reach codex and gemini as command-line arguments, so the
    whole prompt must fit in `ARG_MAX` (1MB on macOS) — that is roughly 20k diff lines. A diff
@@ -146,6 +168,43 @@ differently", naming/style) is not a comment. Fewer, sharper comments beat a lon
 Format: file:line | the trade-off | your concrete alternative | which axis it improves
 ```
 
+**`conform` mode** — the brief is the only standard. Include the worker's completion report
+verbatim if there is one; checking the report against the diff is half the value.
+```
+A delegated worker was given the brief below and produced the change below. The repo is
+at <abs path> — read it. Do not write files.
+
+You are NOT judging whether the work is good. You are checking one thing: does the
+change match the brief it was given? Report deviations in BOTH directions.
+
+THE BRIEF:
+<brief text, verbatim>
+
+THE WORKER'S COMPLETION REPORT (if any):
+<report text, verbatim>
+
+THE CHANGE:
+<diff>
+
+Check for, in this order:
+- UNDONE: something the brief required that the diff does not do
+- FALSE-REPORT: something the report claims (a test run, a file changed, a check passed)
+  that the diff or the repo contradicts — read the repo to confirm before asserting this
+- OUT-OF-SCOPE: changes the brief did not ask for (unrelated refactors, drive-by
+  reformatting, renames, dependency or config edits nobody requested)
+- VIOLATION: something the brief explicitly forbade or constrained, done anyway
+- UNAUTHORIZED-SURFACE: public behaviour, APIs, schemas, or files outside the brief's
+  stated scope that were changed
+
+For each deviation output exactly one line:
+  KIND (undone|false-report|out-of-scope|violation|unauthorized-surface) | file:line or
+  "brief §N" | what deviates | how you verified it
+Quote the brief clause you are measuring against. Verify against the repo, not just the
+diff. Mark UNVERIFIED if you could not check. If the change conforms, say CONFORMS and
+nothing else — do not pad with observations. Do not comment on code quality, style, or
+whether you would have done it differently: only conformance.
+```
+
 ### Step 2 — Dispatch (parallel)
 
 ```sh
@@ -171,11 +230,12 @@ gemini ~130s. Gemini dominates the wall clock in every mode — consider droppin
 user wants a fast pass. It also prefixes answers with narration ("I'm finding the file
 now…"); that is plan mode, not a finding. Ignore it.
 
-### Step 3 — Merge (`plan` / `gap`)
+### Step 3 — Merge (`plan` / `gap` / `conform`)
 
 **Do not run a rebuttal round in these modes.** An omission is a binary fact: one reviewer
 spotting it makes it real, and the others not spotting it is not evidence against — they are
-the same kind of miss you made. Voting here would delete true findings.
+the same kind of miss you made. Voting here would delete true findings. A deviation from a
+brief is the same shape of fact — the brief clause either says it or it does not.
 
 1. **Verify before reporting.** Each finding names a file/line — go check it. Reviewers
    working from a partial read *will* claim missing callers that exist and tests that are
@@ -189,6 +249,18 @@ the same kind of miss you made. Voting here would delete true findings.
    - **Dropouts** — any member that errored
 
 Then ask whether to fix them. Do not start fixing unprompted.
+
+**`conform` mode reports differently, and stops harder.** Group the surviving deviations by
+KIND (undone / false-report / out-of-scope / violation / unauthorized-surface), quoting the
+brief clause each one is measured against. Lead with `false-report` findings if any survived:
+a worker whose completion report does not match its diff is a fact the user needs before
+anything else, including before trusting the rest of that report.
+
+Then stop. **Do not recommend accepting, rejecting, reverting, or amending the work, and do
+not do any of those things.** `conform` establishes facts about a brief; whether work is good
+enough to keep is the user's judgment, and a clean conformance report is not evidence they
+want it. "It matched the brief" and "the user is satisfied" are different claims, and only the
+first is yours to make. If they ask you to act on the findings, that is a new instruction.
 
 ### Step 4 — Adjudicate (`quality` only)
 
@@ -234,6 +306,14 @@ Three reasons, all load-bearing — do not "save a call" by merging them:
 - **Order dependency.** Fixing omissions changes the code, invalidating quality comments
   written against the old version.
 
+`conform` is separate for a different reason: it is the only mode with an **external
+standard**. `gap` and `quality` ask reviewers to apply their own judgment about what good
+looks like; `conform` asks them to apply the brief and nothing else, which is why it can be
+run on work you did not write and its findings can be stated as fact. Fold quality opinions
+into it and you lose exactly that property — the report stops being "here is what deviates
+from what you asked for" and becomes "here is what three models think of your worker",
+which is both unfalsifiable and not what you asked.
+
 ## Requirements
 
 - `codex` (ChatGPT sub), `agy` (Antigravity), `claude` — each optional; missing ones drop out.
@@ -244,13 +324,19 @@ Three reasons, all load-bearing — do not "save a call" by merging them:
 
 - **Reviewers get the repo, not your summary** — hand-picked context reproduces your blind
   spot. Always pass `--workdir` with a real path.
-- **Review only what this session did.** Changes of unknown provenance get raised with the
-  user, never reviewed, committed, or absorbed into your work. This skill finds omissions; it
-  cannot tell you whether the user wants someone else's work kept, and a coherent-looking diff
-  is not evidence that they do.
+- **Review only what this session did**, except in `conform` mode with a brief in hand.
+  Changes of unknown provenance get raised with the user, never reviewed, committed, or
+  absorbed into your work. This skill finds omissions and deviations; it cannot tell you
+  whether the user wants someone else's work kept, and a coherent-looking diff is not evidence
+  that they do.
+- **`conform` needs a brief and excludes the author.** No brief means no standard, which means
+  you are back to judging whether code looks right — ask the user instead. And never let the
+  worker that wrote the code review its own conformance.
+- **`conform` reports, it does not accept.** Never recommend or perform accept/revert/amend on
+  delegated work off the back of a conformance report.
 - **Verify every finding against the code before reporting it.** You are the filter; passing
   through unchecked claims makes the skill worse than useless.
-- **No rebuttal round in `plan`/`gap`.** Corroboration is a bonus, not a requirement.
+- **No rebuttal round in `plan`/`gap`/`conform`.** Corroboration is a bonus, not a requirement.
 - **One rebuttal round in `quality`, conflicts only.** Never loop.
 - **Report, then stop.** The user decides what gets fixed.
 - **Reviewers stay read-only.** Never lift `--workdir`'s hardening; never give a reviewer a
@@ -262,5 +348,10 @@ Three reasons, all load-bearing — do not "save a call" by merging them:
 - The user finished a plan or a non-trivial diff and is about to move on.
 - The user has been in a long session and may have lost track of earlier constraints.
 - A change touches many call sites, or the user says "I think that's everything".
+- **A `/dispatch` worker just reported DONE** — that is the natural moment for `conform`, while
+  the brief is still at hand. Offer it before merging the worktree, not after.
+- The user asks whether a delegated worker "did it right", or is deciding whether to keep work
+  they commissioned elsewhere — run `conform` if a brief exists, and be explicit that it
+  answers only the brief question, not whether they should keep it.
 - Not for routine quality polish — the built-in `/simplify` and `/code-review` cover that with
   one model. Reach for `quality` mode when there is a real architectural trade-off in dispute.

@@ -95,6 +95,11 @@ fails, fix or re-dispatch — never "merge anyway":
 1. **Diff matches brief** — read `git -C <dir> diff`: no scope creep, no deleted
    or weakened tests, no stray/generated files, nothing outside the paths the
    brief named.
+   For a large or high-stakes diff, outsource this check: `/review-me conform
+   <brief file> <ref>` runs it past independent models (excluding the worker
+   that wrote it). Worth it because *you* wrote the brief — if you misread your
+   own wording, you will accept the deviation it caused. It reports deviations
+   only; whether to keep the work stays your call.
 2. **Tests/build pass** — run the project's tests/build against the worker's
    tree and paste the actual result into your report (a claim without the
    command output doesn't count).
