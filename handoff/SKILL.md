@@ -18,9 +18,39 @@ Transfer context to a fresh session via a compact handoff file. Invoke this skil
 
 If arguments describe the next session's focus, tailor "Next Steps" and "Suggested skills" to it.
 
-## Creating a Handoff
+## Where handoffs live
 
-Save to **`$TMPDIR/claude-handoff-<YYYY-MM-DD-HHMM>.md`** (on Windows use `%TEMP%`). The SessionStart hook auto-detects files matching `claude-handoff-*.md`, so keep that prefix.
+Handoffs are **scoped per project**, so several projects can each carry their own without colliding. Ask the helper for the path instead of composing one by hand:
+
+```sh
+bash ~/.claude/skills/handoff/handoff-path.sh --new
+```
+
+It prints the file to write, creating the directory and pruning that project's handoffs beyond the newest 5. Files live at `~/.claude/handoff/<project>-<hash>/claude-handoff-<YYYY-MM-DD-HHMM>.md`.
+
+- The project is `$CLAUDE_PROJECT_DIR`, falling back to the session's cwd. A git worktree is its own project.
+- No argument prints the directory; `--latest` prints the newest existing handoff; `--keep <n>` changes retention.
+- Keep the `claude-handoff-` prefix; the SessionStart hook globs for it.
+- Handoffs never go in the OS temp dir — macOS clears `$TMPDIR` after ~3 days, so one you came back to next week would already be gone.
+
+### Seeing handoffs inside the project
+
+`handoff-path.sh --link` adds `<project>/.claude/handoff` as a symlink to that project's directory, so handoffs appear in the tree and open from the editor. The files themselves stay in `$HOME`, which is what makes this safe:
+
+- `git clean -xdf` can only remove the symlink. The handoffs survive, and the next SessionStart hook silently restores the link.
+- A stray commit would capture a path string, not the handoff contents.
+
+`--link` writes `/.claude/handoff` to `.git/info/exclude` — local to the clone, absent from anyone's diff, shared by every worktree — and then **verifies** with `git check-ignore` before keeping the symlink. A negation pattern such as `!.claude/**` in a `.gitignore` would otherwise leave it exposed, so on a failed check it removes the link and changes nothing. It also refuses to replace a real file or directory already sitting at that path.
+
+`--link-status` reports the current state. `--unlink` removes the symlink and leaves every handoff untouched.
+
+While a project is linked, `--new` and `--latest` print the in-tree path — writing there lands the file in the real directory.
+
+### Handoffs from before scoping
+
+Older handoffs still sit unscoped in the OS temp dir. The hook reports their count when the current project has none of its own; file one with `mv <file> "$(bash ~/.claude/skills/handoff/handoff-path.sh --dir <project>)"/` once you know which project it belongs to.
+
+## Creating a Handoff
 
 Run the **Project map check** (below) first. If the map is missing or stale, **don't build it now** — you're wrapping up and it costs tokens. Instead record it as a Next Step (e.g. `[P1] Run /project-map update (map stale)`) so the resuming session does it with fresh budget.
 
@@ -65,7 +95,7 @@ Run the **Project map check** (below) first. If the map is missing or stale, **d
 
 ### Before saving — run every check
 
-1. Path is `$TMPDIR/claude-handoff-<YYYY-MM-DD-HHMM>.md` — temp dir, correct prefix, **not** the project workspace.
+1. Path came from `handoff-path.sh --new` — never one you composed by hand.
 2. First line is `<!-- HIGHLY SENSITIVE. Do not share this file. -->`.
 3. Scan the draft for secrets before writing it (then eyeball any hits — redact, don't just rename):
    ```sh
@@ -77,9 +107,9 @@ If any check fails, fix the draft first. A handoff that leaks a secret or lands 
 
 ## Resume Flow
 
-Triggered when the user confirms a resume — either after the SessionStart hook reports a handoff, or via `/handoff resume`:
+Triggered when the user confirms a resume — either after the SessionStart hook reports a handoff (it only ever reports one belonging to the current project), or via `/handoff resume`:
 
-1. Read the handoff file.
+1. Read the handoff file — the hook names it, or `handoff-path.sh --latest` finds it.
 2. Load any skills listed under "Suggested skills".
 3. Summarize state (goal + progress) for the user.
 4. Run the **Project map check** (below). If the map is missing or stale, this is the moment to build/update — offer it, and on confirmation follow the project-map skill's workflow before continuing. Then use the map to regain context: read `ARCHITECTURE.md`, grep `.projectmap/tags`, open only the source files the next step needs. Don't re-scan the repo.
@@ -111,7 +141,7 @@ Then act by lifecycle moment — **detection is automatic; building/updating is 
 ## Rules
 
 - **Redact** all secrets (API keys, passwords, tokens) and PII before writing.
-- Save only to the OS temp dir — **never** the project workspace.
+- Save only where `handoff-path.sh --new` points. The handoff itself never enters version control; the optional in-tree symlink is excluded and verified as such.
 - First line of every handoff: `<!-- HIGHLY SENSITIVE. Do not share this file. -->`
 - Reference existing artifacts (PRDs, ADRs, issues, commits, diffs, `.projectmap/`) by path/URL — never duplicate their content.
 

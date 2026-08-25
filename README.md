@@ -6,7 +6,7 @@ Personal collection of [Claude Code](https://claude.com/claude-code) Agent Skill
 
 | Skill | Purpose |
 |---|---|
-| [`handoff`](./handoff) | Context transfer between AI coding sessions — creates a compact handoff doc so a fresh agent can resume. Includes a SessionStart hook (`check-handoff.sh`) that auto-detects handoff files. Integrates with `project-map` (below) to keep docs lean and cut resume-time exploration. |
+| [`handoff`](./handoff) | Context transfer between AI coding sessions — creates a compact handoff doc so a fresh agent can resume. Handoffs are **scoped per project** under `~/.claude/handoff/<project>-<hash>/`, so several projects in flight never cross-contaminate; a SessionStart hook (`check-handoff.sh`) offers a resume only for the project you opened. `handoff-path.sh --link` optionally surfaces them in-tree as `<project>/.claude/handoff` — a symlink, so `git clean -xdf` costs you the link and not the content, and the hook restores it. Integrates with `project-map` (below) to keep docs lean and cut resume-time exploration. |
 | [`grill-me`](./grill-me) | Stress-tests a plan or design by interviewing you relentlessly until the decision tree is resolved. |
 | [`FableAdvisor`](./FableAdvisor) | Codifies the Anthropic-recommended architect/implementer split: Fable 5 (the session) runs `grill-me`'s interview, designs the architecture into a self-contained doc, then hands off to an **implementer subagent** (default Sonnet 5; overridable to opus/haiku, e.g. `/fable-advisor opus`) that implements against the doc and consults Fable (via `CONSULT` → SendMessage ruling) when blocked on design; Fable reviews the diff against the doc before closing. Installs as `fable-advisor`. |
 | [`write-register`](./write-register) | Picks the writing register per output segment, automatically. One test decides it — *will this text still exist after the conversation ends?* — routing to **CHAT** (dense but not telegraphic: it deletes whole moves like restatement and self-summary, and keeps the grammar), **DOC** (natural, self-contained prose for anything that gets saved, with 中文 and English AI-tell lists), or **CODE** (byte-exact, prose rules off). Supersedes `caveman` and `stop-slop`, which contradicted each other — one wanted fragments, the other complete sentences, and neither knew which text it was looking at. Ships as a Claude Code **output style** (`keep-coding-instructions: true`, so the built-in engineering instructions stay), because a classifier that isn't in the system prompt can't classify; the tell lists and `check`/`fix` modes stay on demand in the skill. |
@@ -41,7 +41,7 @@ Copy any skill folder into `~/.claude/skills/`:
 cp -R handoff ~/.claude/skills/
 ```
 
-> **Note**: `handoff`'s SessionStart hook must be registered separately in `~/.claude/settings.json` and references `~/.claude/skills/handoff/check-handoff.sh`.
+> **Note**: `handoff`'s SessionStart hook must be registered separately in `~/.claude/settings.json` and references `~/.claude/skills/handoff/check-handoff.sh`. Handoffs written before per-project scoping still sit unscoped in `$TMPDIR`; the hook counts them when the current project has none, so you can file or discard them.
 >
 > **Note**: `FableAdvisor` installs under its skill name: `cp -R FableAdvisor ~/.claude/skills/fable-advisor`. It expects `grill-me` to be installed too (Phase 1 invokes it).
 >
