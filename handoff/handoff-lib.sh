@@ -99,3 +99,97 @@ handoff_repair_link() {
   printf 'repaired'
   return 0
 }
+
+# --- secret gate -----------------------------------------------------------
+# The scan runs before a draft is filed (handoff-path.sh --commit), because a
+# handoff is written at the exact moment context is running out and a checklist
+# step is easiest to skip. It only ever blocks; it never edits the draft.
+# Rewriting a secret in place would hand the next session a silently altered
+# document, which is harder to notice than a refusal.
+
+# Secrets identifiable by shape alone. Case-sensitive: the prefixes are literal.
+handoff_secret_shapes() {
+  cat <<'EOF'
+-----BEGIN [A-Z ]*PRIVATE KEY-----
+AGE-SECRET-KEY-1[0-9A-Z]{50,}
+sk-ant-[A-Za-z0-9_-]{20,}
+sk-[A-Za-z0-9_-]{32,}
+gh[pousr]_[A-Za-z0-9]{36}
+github_pat_[A-Za-z0-9_]{22,}
+glpat-[A-Za-z0-9_-]{20,}
+(AKIA|ASIA)[0-9A-Z]{16}
+AIza[A-Za-z0-9_-]{35}
+xox[abprs]-[A-Za-z0-9-]{10,}
+xapp-[0-9]-[A-Za-z0-9-]{10,}
+(sk|rk|pk)_(live|test)_[A-Za-z0-9]{16,}
+npm_[A-Za-z0-9]{36}
+hf_[A-Za-z0-9]{30,}
+dop_v1_[a-f0-9]{64}
+SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}
+eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}
+[Bb]earer [A-Za-z0-9._~+/-]{20,}
+[a-zA-Z][a-zA-Z0-9+.-]*://[^/[:space:]:@]+:[^/[:space:]@]+@
+EOF
+}
+
+# A credential-ish name assigned a value that is long enough to be real. The
+# assignment is what makes this usable: prose about tokens or passwords is
+# everywhere in a handoff, `token = <40 chars>` is not.
+handoff_secret_assignments() {
+  printf '%s\n' "(api[_-]?key|secret([_-]?(key|token))?|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|passwo?rd|passwd|private[_-]?key|credentials?)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[^\"'[:space:],;)]{6,}"
+}
+
+# Values that look assigned but carry nothing: placeholders, env references,
+# masked stubs, plain numbers.
+handoff_secret_placeholders() {
+  printf '%s\n' "[:=][[:space:]]*[\"']?(<[^>]*>|\{\{?[A-Za-z0-9_. -]+\}?\}|\\\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|[Xx]{3,}|\*{3,}|\.{3,}|REDACTED|redacted|REMOVED|TODO|CHANGE_?ME|changeme|your[_-]?[A-Za-z]+|example[A-Za-z0-9_-]*|dummy|placeholder|null|nil|true|false|[0-9]+)[\"']?[[:space:],;)]*\$"
+}
+
+# Long runs are masked out of the report: the point is to name the line, not to
+# copy the secret into a terminal, a transcript, or the next handoff.
+handoff_mask_line() {
+  # Inline URL credentials go first: a short password like `hunter2` survives
+  # the length rule below, and it is still a password.
+  sed -E -e 's|://[^/[:space:]@]*@|://[MASKED]@|g' \
+         -e 's/[A-Za-z0-9_+/=-]{12,}/[MASKED]/g'
+}
+
+# Scan a file. Prints one `secret|likely <line>: <masked text>` per hit.
+#   0 clean   1 hits found   2 unreadable
+handoff_scan_secrets() {
+  local file="$1" shapes assigns hit_lines=""
+  [ -r "$file" ] || return 2
+
+  shapes="$(handoff_secret_shapes | grep -nE -f - -- "$file" 2>/dev/null)"
+  assigns="$(handoff_secret_assignments \
+    | grep -oinE -f - -- "$file" 2>/dev/null \
+    | grep -ivE -f <(handoff_secret_placeholders) 2>/dev/null)"
+
+  if [ -n "$shapes" ]; then
+    printf '%s\n' "$shapes" | while IFS= read -r line; do
+      printf 'secret %s\n' "$(printf '%s' "$line" | handoff_mask_line)"
+    done
+    hit_lines="$(printf '%s\n' "$shapes" | cut -d: -f1)"
+  fi
+
+  if [ -n "$assigns" ]; then
+    printf '%s\n' "$assigns" | while IFS= read -r line; do
+      # Skip a line already reported by shape — one hit per line is enough.
+      printf '%s\n' "$hit_lines" | grep -qxF "${line%%:*}" && continue
+      printf 'likely %s\n' "$(printf '%s' "$line" | handoff_mask_line)"
+    done
+  fi
+
+  [ -z "$shapes" ] && [ -z "$assigns" ] && return 0
+  return 1
+}
+
+# Keep the newest $keep handoffs in $store. Shared by --commit and --new so the
+# two cannot drift apart.
+handoff_prune() {
+  local store="$1" keep="${2:-5}"
+  [ "$keep" -gt 0 ] 2>/dev/null || return 0
+  ls -t "$store"/claude-handoff-*.md 2>/dev/null \
+    | tail -n +"$keep" \
+    | while IFS= read -r old; do rm -f "$old"; done
+}

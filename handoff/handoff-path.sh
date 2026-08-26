@@ -2,17 +2,24 @@
 # Prints where this project's handoffs live, and manages the optional in-tree
 # symlink that surfaces them inside the project.
 #
-#   handoff-path.sh              -> the project's handoff directory
-#   handoff-path.sh --new        -> full path for a new handoff file, timestamped
-#                                   now; prunes older handoffs beyond --keep first
-#   handoff-path.sh --latest     -> most recent existing handoff, or nothing
-#   handoff-path.sh --link       -> expose the directory as <project>/.claude/handoff
-#   handoff-path.sh --unlink     -> remove that symlink; files are untouched
-#   handoff-path.sh --link-status-> report whether this project is linked
+#   handoff-path.sh                  -> the project's handoff directory
+#   handoff-path.sh --commit <draft> -> scan <draft> for secrets, then file it as
+#                                       this project's newest handoff and print
+#                                       the path. Refuses on a hit (exit 3) and
+#                                       writes nothing. This is how a handoff
+#                                       gets saved. Removes the draft on success.
+#   handoff-path.sh --scan <file>    -> report secrets without writing anything
+#   handoff-path.sh --latest         -> most recent existing handoff, or nothing
+#   handoff-path.sh --new            -> UNSCANNED path for a new handoff file.
+#                                       Escape hatch only; prefer --commit, which
+#                                       cannot be saved past a secret.
+#   handoff-path.sh --link           -> expose the directory as <project>/.claude/handoff
+#   handoff-path.sh --unlink         -> remove that symlink; files are untouched
+#   handoff-path.sh --link-status    -> report whether this project is linked
 #
 # Options:
 #   --dir <path>   treat <path> as the project (default: $CLAUDE_PROJECT_DIR, else $PWD)
-#   --keep <n>     how many handoffs to retain when using --new (default 5)
+#   --keep <n>     how many handoffs to retain (default 5)
 #
 # Files always live in ~/.claude/handoff/<project>-<hash>/. The symlink is only
 # a view onto them, so `git clean -xdf` can delete the link but not the content.
@@ -23,18 +30,21 @@ set -uo pipefail
 
 mode="dir"
 project=""
+draft=""
 keep=5
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --new)         mode="new" ;;
+    --commit)      mode="commit"; draft="${2:-}"; shift ;;
+    --scan)        mode="scan";   draft="${2:-}"; shift ;;
     --latest)      mode="latest" ;;
     --link)        mode="link" ;;
     --unlink)      mode="unlink" ;;
     --link-status) mode="link-status" ;;
     --dir)         project="${2:-}"; shift ;;
     --keep)        keep="${2:-5}"; shift ;;
-    -h|--help)     sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -70,13 +80,56 @@ case "$mode" in
 
   new)
     mkdir -p "$store" || exit 1
-    # Retain the newest $keep-1 so this project's directory can't grow forever.
-    if [ "$keep" -gt 0 ] 2>/dev/null; then
-      ls -t "$store"/claude-handoff-*.md 2>/dev/null \
-        | tail -n +"$keep" \
-        | while IFS= read -r old; do rm -f "$old"; done
-    fi
+    handoff_prune "$store" "$keep"
+    echo "note: --new bypasses the secret scan; use --commit <draft> to file a handoff." >&2
     printf '%s/claude-handoff-%s.md\n' "$(resolve_base)" "$(date '+%Y-%m-%d-%H%M')"
+    ;;
+
+  scan)
+    if [ -z "$draft" ]; then echo "--scan needs a file" >&2; exit 2; fi
+    report="$(handoff_scan_secrets "$draft")"
+    case "$?" in
+      0) echo "clean: no secrets found in $draft" ;;
+      1) printf '%s\n' "$report" >&2; exit 1 ;;
+      *) echo "cannot read: $draft" >&2; exit 1 ;;
+    esac
+    ;;
+
+  commit)
+    if [ -z "$draft" ]; then echo "--commit needs a draft file" >&2; exit 2; fi
+    if [ ! -f "$draft" ]; then echo "no such draft: $draft" >&2; exit 1; fi
+    if [ ! -s "$draft" ]; then echo "draft is empty: $draft" >&2; exit 1; fi
+
+    # The gate. Nothing is written while a hit stands.
+    report="$(handoff_scan_secrets "$draft")"
+    case "$?" in
+      0) ;;
+      1) printf '%s\n' "$report" >&2
+         echo "refusing to file this handoff — the draft looks like it contains a secret." >&2
+         echo "Redact the line(s) above in $draft, then re-run --commit. Lines marked 'likely' may be false positives; read them before deciding." >&2
+         exit 3 ;;
+      *) echo "cannot read draft: $draft" >&2; exit 1 ;;
+    esac
+
+    mkdir -p "$store" || exit 1
+    handoff_prune "$store" "$keep"
+    # Minute-resolution names collide if two handoffs are filed in the same
+    # minute. --commit consumes the draft, so never silently overwrite.
+    base="$(resolve_base)/claude-handoff-$(date '+%Y-%m-%d-%H%M')"
+    dest="$base.md"
+    n=2
+    while [ -e "$dest" ]; do dest="$base-$n.md"; n=$((n + 1)); done
+
+    hdr='<!-- HIGHLY SENSITIVE. Do not share this file. -->'
+    if [ "$(head -n1 "$draft")" = "$hdr" ]; then
+      cp "$draft" "$dest" || exit 1
+    else
+      { printf '%s\n' "$hdr"; cat "$draft"; } > "$dest" || exit 1
+      echo "note: prepended the sensitivity header, which the draft was missing." >&2
+    fi
+    chmod 600 "$dest" 2>/dev/null || true
+    rm -f "$draft"
+    printf '%s\n' "$dest"
     ;;
 
   link)

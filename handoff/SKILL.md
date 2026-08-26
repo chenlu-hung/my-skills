@@ -20,16 +20,17 @@ If arguments describe the next session's focus, tailor "Next Steps" and "Suggest
 
 ## Where handoffs live
 
-Handoffs are **scoped per project**, so several projects can each carry their own without colliding. Ask the helper for the path instead of composing one by hand:
+Handoffs are **scoped per project**, so several projects can each carry their own without colliding. Write the draft to a scratch file, then hand it to the helper — never compose a destination path yourself:
 
 ```sh
-bash ~/.claude/skills/handoff/handoff-path.sh --new
+bash ~/.claude/skills/handoff/handoff-path.sh --commit <draft>
 ```
 
-It prints the file to write, creating the directory and pruning that project's handoffs beyond the newest 5. Files live at `~/.claude/handoff/<project>-<hash>/claude-handoff-<YYYY-MM-DD-HHMM>.md`.
+`--commit` scans the draft for secrets, and only if it comes back clean does it file the draft as this project's newest handoff, print the resulting path, and delete the draft. Files land at `~/.claude/handoff/<project>-<hash>/claude-handoff-<YYYY-MM-DD-HHMM>.md`, pruned to the newest 5.
 
 - The project is `$CLAUDE_PROJECT_DIR`, falling back to the session's cwd. A git worktree is its own project.
-- No argument prints the directory; `--latest` prints the newest existing handoff; `--keep <n>` changes retention.
+- No argument prints the directory; `--latest` prints the newest existing handoff; `--keep <n>` changes retention; `--scan <file>` reports secrets without writing anything.
+- `--new` prints an unscanned destination path. It is an escape hatch, not the normal route — a handoff written that way never passes the gate.
 - Keep the `claude-handoff-` prefix; the SessionStart hook globs for it.
 - Handoffs never go in the OS temp dir — macOS clears `$TMPDIR` after ~3 days, so one you came back to next week would already be gone.
 
@@ -44,7 +45,7 @@ It prints the file to write, creating the directory and pruning that project's h
 
 `--link-status` reports the current state. `--unlink` removes the symlink and leaves every handoff untouched.
 
-While a project is linked, `--new` and `--latest` print the in-tree path — writing there lands the file in the real directory.
+While a project is linked, `--commit` and `--latest` report the in-tree path — the file itself still lands in the real directory.
 
 ### Handoffs from before scoping
 
@@ -93,17 +94,24 @@ Run the **Project map check** (below) first. If the map is missing or stale, **d
 
 **Quick mode**: keep only the goal, suggested skills, and 3-5 next steps.
 
-### Before saving — run every check
+### Saving
 
-1. Path came from `handoff-path.sh --new` — never one you composed by hand.
-2. First line is `<!-- HIGHLY SENSITIVE. Do not share this file. -->`.
-3. Scan the draft for secrets before writing it (then eyeball any hits — redact, don't just rename):
-   ```sh
-   grep -inE 'api[_-]?key|secret|token|passw(or)?d|bearer|BEGIN (RSA|OPENSSH)' <draft>
-   ```
-4. No section exceeds ~5 bullets; no pasted artifact content — pointers only.
+Write the draft to a scratch path, then file it:
 
-If any check fails, fix the draft first. A handoff that leaks a secret or lands in the repo is worse than no handoff.
+```sh
+bash ~/.claude/skills/handoff/handoff-path.sh --commit <draft>
+```
+
+The draft is transient, so a scratch path is fine for it — it is consumed and removed. Only the filed handoff needs to survive, which is why it goes to `$HOME` rather than the temp dir.
+
+The gate runs inside `--commit` rather than as a step you remember, because a handoff gets written exactly when context is running out and a checklist is easiest to skip. On a hit it prints the offending lines with the values masked, exits 3, and writes nothing:
+
+- `secret` — a credential identified by shape (`sk-ant-…`, `AKIA…`, a private-key header, credentials inside a URL). Treat it as real.
+- `likely` — a credential-ish name assigned a value long enough to be one. Read the line before deciding; prose about tokens and passwords does not trigger this, an assignment does.
+
+Redact the draft and re-run. The scan never edits the draft itself: quietly rewriting a value would hand the next session an altered document, which is harder to notice than a refusal. If the draft is missing the sensitivity header, `--commit` prepends it and says so.
+
+One check the gate cannot make for you: no section exceeds ~5 bullets, and no artifact content is pasted in — pointers only.
 
 ## Resume Flow
 
@@ -141,7 +149,7 @@ Then act by lifecycle moment — **detection is automatic; building/updating is 
 ## Rules
 
 - **Redact** all secrets (API keys, passwords, tokens) and PII before writing.
-- Save only where `handoff-path.sh --new` points. The handoff itself never enters version control; the optional in-tree symlink is excluded and verified as such.
+- File every handoff through `handoff-path.sh --commit`, so the secret scan cannot be skipped. The handoff itself never enters version control; the optional in-tree symlink is excluded and verified as such.
 - First line of every handoff: `<!-- HIGHLY SENSITIVE. Do not share this file. -->`
 - Reference existing artifacts (PRDs, ADRs, issues, commits, diffs, `.projectmap/`) by path/URL — never duplicate their content.
 
