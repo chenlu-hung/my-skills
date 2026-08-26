@@ -146,6 +146,20 @@ Then act by lifecycle moment — **detection is automatic; building/updating is 
 - **Resuming** (fresh budget, pays off this session): if stale/missing, offer to run `/project-map update` or `/project-map build`. On confirmation, follow the project-map skill's workflow, then continue the resume.
 - **Creating** (wrapping up — don't spend build tokens now): record the state as a Next Step instead, e.g. `[P1] Run /project-map update (map stale)` or `[P2] /project-map build — no map yet; would cut next session's exploration`.
 
+## Other harnesses
+
+The store and the scripts are shared, so a handoff written from one harness resumes in another. Install elsewhere by pointing at this directory rather than copying it — one copy of the scripts is what keeps the two installs from drifting:
+
+```sh
+ln -s ~/.claude/skills/handoff ~/.codex/skills/handoff
+```
+
+What differs is the trigger. Claude Code's SessionStart hook detects this project's newest handoff and offers a resume unprompted; nowhere else is there a session-start event to hang that on, so resuming is user-triggered — run `handoff-path.sh --latest` and follow the Resume Flow from step 1.
+
+Project resolution differs too, and it matters because the store directory is keyed on the project path. Claude Code publishes `$CLAUDE_PROJECT_DIR`; without it the scripts take the enclosing repo root, so a session started deep inside the tree still files its handoff where the next one looks. Set `HANDOFF_PROJECT_DIR` to pin the project explicitly when neither holds — outside a repo the fallback is the cwd, which is only right if that is where the session started.
+
+Filed handoffs keep the `claude-handoff-` prefix whichever harness wrote them; the hook globs for it.
+
 ## Rules
 
 - **Redact** all secrets (API keys, passwords, tokens) and PII before writing.

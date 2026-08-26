@@ -18,7 +18,8 @@
 #   handoff-path.sh --link-status    -> report whether this project is linked
 #
 # Options:
-#   --dir <path>   treat <path> as the project (default: $CLAUDE_PROJECT_DIR, else $PWD)
+#   --dir <path>   treat <path> as the project. Default: $HANDOFF_PROJECT_DIR,
+#                  else $CLAUDE_PROJECT_DIR, else the enclosing repo root, else $PWD
 #   --keep <n>     how many handoffs to retain (default 5)
 #
 # Files always live in ~/.claude/handoff/<project>-<hash>/. The symlink is only
@@ -50,7 +51,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-[ -z "$project" ] && project="${CLAUDE_PROJECT_DIR:-$PWD}"
+[ -z "$project" ] && project="$(handoff_project_dir_local)"
 project="${project%/}"
 store="$(handoff_store "$project")"
 link="$(handoff_link_path "$project")"

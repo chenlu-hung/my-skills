@@ -17,17 +17,34 @@ handoff_root() {
   printf '%s' "${CLAUDE_HANDOFF_ROOT:-$HOME/.claude/handoff}"
 }
 
-# Resolve the project this session belongs to.
-# Order: $CLAUDE_PROJECT_DIR -> "cwd" from the hook's JSON payload on stdin -> $PWD.
+# Resolve the project this session belongs to. Order:
+#   $HANDOFF_PROJECT_DIR -> $CLAUDE_PROJECT_DIR -> "cwd" from the hook's JSON
+#   payload on stdin -> the enclosing repo root -> $PWD
+#
+# The repo root matters for harnesses that publish no project-dir variable
+# (Codex, for one). The store directory is keyed on this path, so a session
+# started in a subdirectory would otherwise file its handoff somewhere the next
+# session never looks. $HANDOFF_PROJECT_DIR pins it when neither holds.
+# Everything except the hook's stdin payload. Callers invoked from an agent's
+# shell must use this one: stdin there is a pipe, not a tty, so the payload step
+# below would consume whatever happens to be on it.
+handoff_project_dir_local() {
+  local dir="${HANDOFF_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}"
+  [ -z "$dir" ] && dir="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"
+  [ -z "$dir" ] && dir="$PWD"
+  printf '%s' "$dir"
+}
+
+# The full chain, for the SessionStart hook, which is handed JSON on stdin.
 handoff_project_dir() {
-  local dir="${CLAUDE_PROJECT_DIR:-}"
+  local dir="${HANDOFF_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}"
   if [ -z "$dir" ] && [ ! -t 0 ]; then
     dir="$(cat 2>/dev/null \
       | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
       | head -n1)"
   fi
-  [ -z "$dir" ] && dir="$PWD"
-  printf '%s' "$dir"
+  [ -n "$dir" ] && { printf '%s' "$dir"; return 0; }
+  handoff_project_dir_local
 }
 
 handoff_slug() {
@@ -44,7 +61,7 @@ handoff_slug() {
 # Where this project's handoffs physically live. Does not create it.
 handoff_store() {
   local dir="${1:-}"
-  [ -z "$dir" ] && dir="$(handoff_project_dir)"
+  [ -z "$dir" ] && dir="$(handoff_project_dir_local)"
   printf '%s/%s' "$(handoff_root)" "$(handoff_slug "$dir")"
 }
 
