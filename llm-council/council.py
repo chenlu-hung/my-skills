@@ -308,8 +308,13 @@ def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
     """ChatGPT desktop app, driven over its debugging port by `chatgpt_ask.py`.
 
     This member answers out of the ChatGPT **conversation** allowance instead of the Codex
-    quota `run_codex` spends, which is the whole reason it exists. The app must already be
-    running with `--remote-debugging-port`; see chatgpt_ask.py for the launch line.
+    quota `run_codex` spends, which is the whole reason it exists. `chatgpt_ask.py` starts
+    and stops the app itself and asks in a temporary chat, so nothing has to be set up
+    beforehand and no thread is left in the user's history.
+
+    Invoked through `uv run` because it declares its own dependency (`websockets`) inline
+    per PEP 723 — running it with a bare interpreter fails unless that happens to have
+    websockets installed. Falls back to this interpreter when uv is absent.
 
     Two things it cannot do that the CLI members can:
 
@@ -326,17 +331,23 @@ def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
                 "error": "chatgpt member cannot read a borrowed --workdir (it has no filesystem)"}
 
     if schema:
-        prompt = f"{prompt}\n\nRespond with ONLY a JSON object matching this schema:\n{schema[1]}"
+        prompt = (f"{prompt}\n\nRespond with ONLY a JSON object matching this schema:\n"
+                  f"{schema[1]}\n\nEmit raw JSON. Do not wrap it in a code fence and do not "
+                  f"backslash-escape Markdown punctuation such as underscores.")
 
     promptdir = tempfile.mkdtemp(prefix="council-chatgpt-")
     promptfile = os.path.join(promptdir, "question.txt")
     try:
         with open(promptfile, "w", encoding="utf-8") as fh:
             fh.write(prompt)
-        cmd = [sys.executable, CHATGPT_ASK, "--prompt-file", promptfile,
-               "--json", "--timeout", str(timeout)]
+        uv = shutil.which("uv")
+        launcher = [uv, "run", "--quiet"] if uv else [sys.executable]
+        cmd = launcher + [CHATGPT_ASK, "--prompt-file", promptfile,
+                          "--json", "--timeout", str(timeout)]
         t0 = time.time()
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30,
+        # +60: the script may have to relaunch the app before it can ask, and
+        # a cold start costs about 15s on top of the model's own timeout.
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 60,
                               stdin=subprocess.DEVNULL)
         elapsed = round(time.time() - t0, 1)
     finally:
@@ -349,7 +360,14 @@ def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
         return {"ok": False, "answer": "", "structured": None, "model": "desktop app",
                 "elapsed_s": elapsed, "error": err}
 
-    answer, structured = parse_structured(result.get("answer", ""))
+    raw = result.get("answer", "")
+    answer, structured = parse_structured(raw)
+    if schema and structured is None:
+        # Asked for JSON, got JSON-shaped prose: the app writes answers as
+        # Markdown, so it escapes punctuation ("COUNCIL\_UV\_OK") and `\_` is
+        # not a defined JSON escape. Drop backslashes before characters JSON
+        # gives no meaning to, keeping the seven real escapes intact.
+        answer, structured = parse_structured(re.sub(r'\\([^"\\/bfnrtu])', r"\1", raw))
     return {"ok": bool(result.get("ok")) and bool(answer), "answer": answer,
             "structured": structured, "model": model or "desktop app",
             "elapsed_s": result.get("elapsed_s", elapsed), "error": result.get("error", "")}
@@ -359,7 +377,7 @@ RUNNERS = {"codex": run_codex, "gemini": run_gemini, "claude": run_claude,
            "chatgpt": run_chatgpt}
 
 # CLI binary each member shells out to — used for the "not installed" error message.
-CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude", "chatgpt": sys.executable}
+CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude", "chatgpt": "uv"}
 
 
 def dispatch(name, prompt, model, timeout, workdir, borrowed, schema=None):

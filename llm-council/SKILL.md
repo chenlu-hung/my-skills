@@ -36,10 +36,15 @@ swaps Codex out for the desktop app when Codex quota is what's being conserved).
 
 ## The ChatGPT member
 
-Setup, and the reason the debugging port must not be left open, are documented in the
-`chatgpt_ask.py` module docstring — read it before first use. In short: the app has to be
-running with that port open, the port is unauthenticated while it is, and `websockets` must
-be installed for whichever interpreter runs `council.py`.
+**Nothing needs setting up.** `chatgpt_ask.py` relaunches ChatGPT.app with a debugging port
+when one isn't already open, and quits it again afterwards — an app that was *already*
+serving the port belongs to the user's session and is left alone. It runs through `uv`
+(dependencies declared inline, PEP 723), so no interpreter needs preparing either. Budget
+about 15s for a cold app start on top of the answer itself.
+
+**Questions go into a temporary chat**, so they never enter the account's history. If that
+control can't be found the member *refuses* rather than filing the thread for real;
+`--allow-history` overrides that if the user asks for it.
 
 It honours `--schema` the same way the others do, but by *asking* rather than enforcing:
 there is no `--output-schema` in a GUI, so the schema is appended to the prompt and
@@ -49,8 +54,8 @@ Three limits the CLI members don't have:
 
 - **No filesystem.** It answers from inside the app, so `--workdir` is unreadable to it. The
   member refuses outright rather than answering as though it had read the repo.
-- **It drives the real UI.** Each call opens a new thread in the user's own account and
-  leaves it in their history. Don't use the app while a call is in flight.
+- **It drives the real UI.** Don't use the app while a call is in flight, and note the
+  debugging port is unauthenticated for as long as it is open.
 - **Selectors are version-bound.** It finds the composer and the reply by DOM shape
   (`[contenteditable]`, `[data-user-message-bubble]`, `_MarkdownRoot_*`). An app update that
   reshapes those breaks it; re-probe the DOM rather than guessing new selectors.
@@ -175,9 +180,9 @@ as `ok: false` and the council proceeds with the rest.
   `"auth_mode": "chatgpt"`; else `codex login`.
 - **`agy`** (Antigravity CLI) — signed in for Gemini models.
 - **`claude`** (Claude Code) — the same subscription as this session.
-- **`python3`** — stdlib only, except the opt-in `chatgpt` member, which needs `websockets`.
-- **ChatGPT.app** — only for the `chatgpt` member: signed in, running, and listening on its
-  debugging port. `curl -s http://127.0.0.1:9222/json/version` confirms it.
+- **`python3`** (stdlib only — the `chatgpt` member's own dependency is handled by `uv`).
+- **ChatGPT.app + `uv`** — only for the `chatgpt` member: the app installed and signed in.
+  It is launched and quit for you, so it does not need to be running beforehand.
 
 `council.py` degrades gracefully: a missing CLI, timeout, or crash becomes a per-member
 `ok: false` with an `error` string rather than failing the whole run.
