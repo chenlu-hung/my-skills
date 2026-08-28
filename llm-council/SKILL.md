@@ -19,7 +19,7 @@ OpenRouter.
 | **Codex** | `codex exec` | ChatGPT subscription (`auth_mode: chatgpt` in `~/.codex/auth.json`) |
 | **Gemini** | Antigravity `agy -p` | Google Antigravity sign-in (Gemini models) |
 | **Claude** | `claude -p` | Claude subscription — runs as an **independent member**, isolated from the chair |
-| **ChatGPT** *(opt-in)* | `chatgpt_ask.py`, over the desktop app's debugging port | the app's own sign-in |
+| **ChatGPT** *(opt-in)* | `chatgpt-ask`, over the desktop app's debugging port | the app's own sign-in |
 
 `chatgpt` answers out of the ChatGPT **conversation** allowance rather than the Codex quota
 that `codex` spends, which is the reason to reach for it. It is opt-in because it needs setup
@@ -36,11 +36,15 @@ swaps Codex out for the desktop app when Codex quota is what's being conserved).
 
 ## The ChatGPT member
 
-**Nothing needs setting up.** `chatgpt_ask.py` relaunches ChatGPT.app with a debugging port
-when one isn't already open, and quits it again afterwards — an app that was *already*
-serving the port belongs to the user's session and is left alone. It runs through `uv`
-(dependencies declared inline, PEP 723), so no interpreter needs preparing either. Budget
-about 15s for a cold app start on top of the answer itself.
+Runs through the **`chatgpt-ask`** command, which lives in its own directory
+(`chatgpt-bridge/`) because this skill is not its only consumer — see that README for
+install and behaviour. `council.py` resolves it on PATH first and falls back to the
+sibling checkout, so it is never copied in here.
+
+**Nothing needs setting up.** The bridge relaunches ChatGPT.app with a debugging port when
+one isn't already open, and quits it again afterwards — an app that was *already* serving
+the port belongs to the user's session and is left alone. Budget about 15s for a cold app
+start on top of the answer itself.
 
 **Questions go into a temporary chat**, so they never enter the account's history. If that
 control can't be found the member *refuses* rather than filing the thread for real;
@@ -181,8 +185,9 @@ as `ok: false` and the council proceeds with the rest.
 - **`agy`** (Antigravity CLI) — signed in for Gemini models.
 - **`claude`** (Claude Code) — the same subscription as this session.
 - **`python3`** (stdlib only — the `chatgpt` member's own dependency is handled by `uv`).
-- **ChatGPT.app + `uv`** — only for the `chatgpt` member: the app installed and signed in.
-  It is launched and quit for you, so it does not need to be running beforehand.
+- **`chatgpt-ask`** (plus ChatGPT.app and `uv`) — only for the `chatgpt` member. The app is
+  launched and quit for you, so it does not need to be running beforehand. If the command is
+  missing, that member returns `ok: false` telling you to link it; see `chatgpt-bridge/`.
 
 `council.py` degrades gracefully: a missing CLI, timeout, or crash becomes a per-member
 `ok: false` with an `error` string rather than failing the whole run.

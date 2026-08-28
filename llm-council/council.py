@@ -301,20 +301,31 @@ def run_claude(prompt, model, timeout, workdir, borrowed, schema=None):
             "model": model or "default", "elapsed_s": elapsed, "error": err}
 
 
-CHATGPT_ASK = os.path.join(HERE, "chatgpt_ask.py")
+def chatgpt_ask_command():
+    """How to invoke the ChatGPT bridge, or None if it isn't installed.
+
+    The bridge lives in its own directory (chatgpt-bridge/) because this skill is
+    not its only consumer, and a copy per consumer is how the other shared pieces
+    here drifted apart. PATH is checked first so every consumer resolves the one
+    install; the sibling fallback only covers a checkout with no symlink yet.
+    """
+    on_path = shutil.which("chatgpt-ask")
+    if on_path:
+        return [on_path]  # PEP 723 shebang; uv resolves its own dependencies
+    sibling = os.path.join(os.path.dirname(HERE), "chatgpt-bridge", "chatgpt_ask.py")
+    if os.path.exists(sibling):
+        uv = shutil.which("uv")
+        return [uv, "run", "--quiet", sibling] if uv else [sys.executable, sibling]
+    return None
 
 
 def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
-    """ChatGPT desktop app, driven over its debugging port by `chatgpt_ask.py`.
+    """ChatGPT desktop app, driven over its debugging port by the `chatgpt-ask` bridge.
 
     This member answers out of the ChatGPT **conversation** allowance instead of the Codex
-    quota `run_codex` spends, which is the whole reason it exists. `chatgpt_ask.py` starts
-    and stops the app itself and asks in a temporary chat, so nothing has to be set up
+    quota `run_codex` spends, which is the whole reason it exists. The bridge starts and
+    stops the app itself and asks in a temporary chat, so nothing has to be set up
     beforehand and no thread is left in the user's history.
-
-    Invoked through `uv run` because it declares its own dependency (`websockets`) inline
-    per PEP 723 — running it with a bare interpreter fails unless that happens to have
-    websockets installed. Falls back to this interpreter when uv is absent.
 
     Two things it cannot do that the CLI members can:
 
@@ -330,20 +341,28 @@ def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
                 "elapsed_s": 0,
                 "error": "chatgpt member cannot read a borrowed --workdir (it has no filesystem)"}
 
+    bridge = chatgpt_ask_command()
+    if bridge is None:
+        return {"ok": False, "answer": "", "structured": None, "model": "desktop app",
+                "elapsed_s": 0,
+                "error": "`chatgpt-ask` not found — link chatgpt-bridge/chatgpt_ask.py "
+                         "into PATH (see chatgpt-bridge/README.md)"}
+
     if schema:
-        prompt = (f"{prompt}\n\nRespond with ONLY a JSON object matching this schema:\n"
-                  f"{schema[1]}\n\nEmit raw JSON. Do not wrap it in a code fence and do not "
-                  f"backslash-escape Markdown punctuation such as underscores.")
+        # "matching this schema" reads to the app as "fill this template in", and it
+        # answers by echoing the schema with the reply buried in a `description`.
+        # Asking for an instance explicitly is what stops that.
+        prompt = (f"{prompt}\n\nRespond with ONLY a JSON object that CONFORMS to this JSON "
+                  f"Schema. Return an instance of it, not the schema itself:\n{schema[1]}\n\n"
+                  f"Emit raw JSON: no code fence, and no backslash-escaping of Markdown "
+                  f"punctuation such as underscores.")
 
     promptdir = tempfile.mkdtemp(prefix="council-chatgpt-")
     promptfile = os.path.join(promptdir, "question.txt")
     try:
         with open(promptfile, "w", encoding="utf-8") as fh:
             fh.write(prompt)
-        uv = shutil.which("uv")
-        launcher = [uv, "run", "--quiet"] if uv else [sys.executable]
-        cmd = launcher + [CHATGPT_ASK, "--prompt-file", promptfile,
-                          "--json", "--timeout", str(timeout)]
+        cmd = bridge + ["--prompt-file", promptfile, "--json", "--timeout", str(timeout)]
         t0 = time.time()
         # +60: the script may have to relaunch the app before it can ask, and
         # a cold start costs about 15s on top of the model's own timeout.
@@ -368,6 +387,12 @@ def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
         # not a defined JSON escape. Drop backslashes before characters JSON
         # gives no meaning to, keeping the seven real escapes intact.
         answer, structured = parse_structured(re.sub(r'\\([^"\\/bfnrtu])', r"\1", raw))
+    if isinstance(structured, dict) and "properties" in structured and \
+            structured.get("type") == "object":
+        # It echoed the schema back instead of instantiating it. Treat that as
+        # unstructured rather than letting a schema document travel downstream
+        # as if it were an answer.
+        structured = None
     return {"ok": bool(result.get("ok")) and bool(answer), "answer": answer,
             "structured": structured, "model": model or "desktop app",
             "elapsed_s": result.get("elapsed_s", elapsed), "error": result.get("error", "")}
@@ -377,7 +402,7 @@ RUNNERS = {"codex": run_codex, "gemini": run_gemini, "claude": run_claude,
            "chatgpt": run_chatgpt}
 
 # CLI binary each member shells out to — used for the "not installed" error message.
-CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude", "chatgpt": "uv"}
+CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude", "chatgpt": "chatgpt-ask"}
 
 
 def dispatch(name, prompt, model, timeout, workdir, borrowed, schema=None):
