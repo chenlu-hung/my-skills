@@ -19,14 +19,41 @@ OpenRouter.
 | **Codex** | `codex exec` | ChatGPT subscription (`auth_mode: chatgpt` in `~/.codex/auth.json`) |
 | **Gemini** | Antigravity `agy -p` | Google Antigravity sign-in (Gemini models) |
 | **Claude** | `claude -p` | Claude subscription — runs as an **independent member**, isolated from the chair |
+| **ChatGPT** *(opt-in)* | `chatgpt_ask.py`, over the desktop app's debugging port | the app's own sign-in |
 
-All three members run **in parallel** through `council.py`, each in a throwaway temp dir —
+`chatgpt` answers out of the ChatGPT **conversation** allowance rather than the Codex quota
+that `codex` spends, which is the reason to reach for it. It is opt-in because it needs setup
+and carries limits the other members don't — see [The ChatGPT member](#the-chatgpt-member).
+
+Members run **in parallel** through `council.py`, each in a throwaway temp dir —
 this skill never passes `--workdir`, so no member can see the user's repo (see Rules).
 **This Claude Code session is the Chairman**: it only synthesizes — it does *not* also submit
 a member answer, because the `claude` member already carries Claude's independent voice (run
 with `--setting-sources project` so the session's hooks/memory don't leak into it). The CLIs
 are stateless one-shot calls, so every prompt must be self-contained. `council.py` defaults to
-all three members; pass `--members` to use a subset.
+`codex,gemini,claude`; pass `--members` to change that (`--members chatgpt,gemini,claude`
+swaps Codex out for the desktop app when Codex quota is what's being conserved).
+
+## The ChatGPT member
+
+Setup, and the reason the debugging port must not be left open, are documented in the
+`chatgpt_ask.py` module docstring — read it before first use. In short: the app has to be
+running with that port open, the port is unauthenticated while it is, and `websockets` must
+be installed for whichever interpreter runs `council.py`.
+
+It honours `--schema` the same way the others do, but by *asking* rather than enforcing:
+there is no `--output-schema` in a GUI, so the schema is appended to the prompt and
+`parse_structured` falls back to prose if the reply is not JSON.
+
+Three limits the CLI members don't have:
+
+- **No filesystem.** It answers from inside the app, so `--workdir` is unreadable to it. The
+  member refuses outright rather than answering as though it had read the repo.
+- **It drives the real UI.** Each call opens a new thread in the user's own account and
+  leaves it in their history. Don't use the app while a call is in flight.
+- **Selectors are version-bound.** It finds the composer and the reply by DOM shape
+  (`[contenteditable]`, `[data-user-message-bubble]`, `_MarkdownRoot_*`). An app update that
+  reshapes those breaks it; re-probe the DOM rather than guessing new selectors.
 
 ## Modes
 
@@ -148,10 +175,64 @@ as `ok: false` and the council proceeds with the rest.
   `"auth_mode": "chatgpt"`; else `codex login`.
 - **`agy`** (Antigravity CLI) — signed in for Gemini models.
 - **`claude`** (Claude Code) — the same subscription as this session.
-- **`python3`** (stdlib only).
+- **`python3`** — stdlib only, except the opt-in `chatgpt` member, which needs `websockets`.
+- **ChatGPT.app** — only for the `chatgpt` member: signed in, running, and listening on its
+  debugging port. `curl -s http://127.0.0.1:9222/json/version` confirms it.
 
 `council.py` degrades gracefully: a missing CLI, timeout, or crash becomes a per-member
 `ok: false` with an `error` string rather than failing the whole run.
+
+### CLI wiring that is easy to get wrong
+
+- **Every CLI child gets `stdin=DEVNULL`.** With stdin a pipe rather than a TTY — which is
+  the case for every call from an agent harness — `codex exec` prints
+  `Reading additional input from stdin...` and waits for a SECOND prompt. The turn is then
+  truncated: no `-o` file, one status line on stdout, and `codex doctor` reports everything
+  healthy, so it looks like a model or quota failure when it is neither. `agy` leaks the
+  same way. Pinned by `test_council.py` → "stdin isolation".
+  Because members run concurrently, whichever child reads the inherited pipe first drains
+  it — so the leak is nondeterministic. Test one member at a time.
+- **`codex` reports through `-o <file>`, never stdout.** Do not parse its prose output.
+- **Recovery when a codex answer comes back empty:** the full turn is always persisted to
+  `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. `codex_rollout_fallback()` reads the
+  newest rollout touched since the call began and takes the last assistant `output_text`.
+  This has recovered complete answers that stdout lost entirely.
+- **`--model gpt-5-codex` is rejected under ChatGPT auth** (HTTP 400). Leave the model empty
+  to take the subscription default.
+- **`agy`: flags must precede `-p`** (Go flag parsing), or `-p` swallows the next flag as its
+  value. Headless `agy` also needs `--dangerously-skip-permissions` just to *read* files —
+  never point that at a directory you are not willing to have written to; copy files to a
+  scratch dir first if the target matters. Long prompts can still return empty.
+- **`opencode run` needs `--format json`**; its plain output is one banner line under a pipe.
+
+### Structured output is ON by default
+
+Every member is bound to `schema/answer.schema.json` (`answer`, `key_points`, `confidence`,
+`caveats`). All three CLIs support it, so members stay comparable:
+
+| member | flag | shape |
+|---|---|---|
+| codex | `--output-schema <FILE>` | the `-o` file holds raw JSON |
+| agy | `--json-schema <FILE>` **plus `--output-format json`** — it refuses the schema otherwise | envelope, parsed object under `structured_output` |
+| claude | `--json-schema '<inline JSON>'` — **a path is rejected** | stdout is raw JSON |
+
+**The JSON is rendered straight back to Markdown into `answer`, with the raw object kept under
+`structured`.** That is what makes the default safe: Stage-3 synthesis, `--anonymize`, and the
+human all keep reading prose. A member that ignores the schema passes through unchanged rather
+than being dropped.
+
+`--output-schema FILE` swaps the schema (e.g. a findings shape for `review-me`);
+`--no-output-schema` turns it off entirely.
+
+**Two constraints the schema must satisfy** — both found by end-to-end testing, both silent
+until the member returns an error string instead of an answer:
+
+1. **No `$schema` key.** `claude --json-schema` rejects a `https://json-schema.org/draft/2020-12/schema`
+   ref outright ("no schema with key or ref").
+2. **`required` must list EVERY key in `properties`**, with `additionalProperties: false`.
+   codex goes through OpenAI structured outputs, which refuses partial `required`
+   ("'required' is required to be supplied and to be an array including every key in properties").
+   So there are no optional fields — document "empty array if none" in each description instead.
 
 ## Rules
 

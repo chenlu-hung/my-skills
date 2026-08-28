@@ -32,7 +32,8 @@ print("ARGV=" + json.dumps(sys.argv[1:]) + "\\nSTDIN=" + json.dumps(sys.stdin.re
 CODEX_STUB = """#!/usr/bin/env python3
 import sys, json
 a = sys.argv[1:]
-open(a[a.index("-o") + 1], "w").write("ARGV=" + json.dumps(a) + "\\nSTDIN=\\"\\"")
+open(a[a.index("-o") + 1], "w").write(
+    "ARGV=" + json.dumps(a) + "\\nSTDIN=" + json.dumps(sys.stdin.read()))
 """
 
 failures = []
@@ -54,9 +55,10 @@ def stub_dir():
     return d
 
 
-def run(args, stubs):
+def run(args, stubs, stdin_text=""):
     env = dict(os.environ, PATH=stubs + os.pathsep + os.environ["PATH"])
-    proc = subprocess.run([sys.executable, COUNCIL, *args], capture_output=True, text=True, env=env)
+    proc = subprocess.run([sys.executable, COUNCIL, *args], capture_output=True, text=True,
+                          env=env, input=stdin_text)
     members = json.loads(proc.stdout)["members"] if proc.stdout.strip().startswith("{") else {}
     parsed = {}
     for name, res in members.items():
@@ -121,6 +123,76 @@ def main():
         check("no tool denials", "--disallowedTools" not in m["claude"][0])
         check("project settings still loaded", val(m["claude"][0], "--setting-sources") == "project")
         check("codex still sandboxed", val(m["codex"][0], "-s") == "read-only")
+
+        # Every CLI child must get stdin=DEVNULL. `codex exec` with an inherited pipe on
+        # stdin prints "Reading additional input from stdin..." and waits for a second
+        # prompt, truncating the turn: no `-o` file, and `codex doctor` stays all green.
+        # Feed the parent a non-empty stdin the way an agent harness does, and check none
+        # of it leaks into the children.
+        print("stdin isolation (codex exec truncates on an inherited pipe):")
+        # One member at a time: members run concurrently, so whichever child reads the
+        # inherited pipe first drains it — testing them together makes the leak
+        # nondeterministic and the assertion useless.
+        _, mc = run(["--prompt", "Q", "--members", "codex"], stubs, stdin_text="LEAKED-STDIN")
+        check("codex gets a closed stdin", mc["codex"][1] == "", repr(mc["codex"][1]))
+        _, mg = run(["--prompt", "Q", "--members", "gemini"], stubs, stdin_text="LEAKED-STDIN")
+        check("gemini gets a closed stdin", mg["gemini"][1] == "", repr(mg["gemini"][1]))
+        _, ml = run(["--prompt", "Q", "--members", "claude"], stubs, stdin_text="LEAKED-STDIN")
+        check("claude still receives the prompt on stdin (deliberate)",
+              ml["claude"][1] == "Q", repr(ml["claude"][1]))
+
+        # Structured output is ON by default and must reach every member in the form its
+        # CLI accepts: codex/agy take a FILE, claude takes an inline JSON STRING. Getting the
+        # form wrong is silent — the CLI errors and the member just comes back empty.
+        print("structured output (default on):")
+        _, ms = run(["--prompt", "Q"], stubs)
+        cdx, gem, cld = ms["codex"][0], ms["gemini"][0], ms["claude"][0]
+        check("codex gets --output-schema as a file path",
+              (val(cdx, "--output-schema") or "").endswith(".json"), repr(val(cdx, "--output-schema")))
+        check("agy gets --json-schema as a file path",
+              (val(gem, "--json-schema") or "").endswith(".json"), repr(val(gem, "--json-schema")))
+        check("agy also gets --output-format json (it rejects the schema otherwise)",
+              val(gem, "--output-format") == "json", repr(val(gem, "--output-format")))
+        check("claude gets --json-schema inline, not a path",
+              (val(cld, "--json-schema") or "").startswith("{"), repr(val(cld, "--json-schema"))[:60])
+        check("claude keeps --disallowedTools last even with a schema",
+              "--disallowedTools" not in cld or cld[-4:] == ["Write", "Edit", "NotebookEdit", "Bash"])
+
+        _, mn = run(["--prompt", "Q", "--no-output-schema"], stubs)
+        check("--no-output-schema drops it from every member",
+              not any(f in mn[m][0] for m, f in (("codex", "--output-schema"),
+                                                ("gemini", "--json-schema"),
+                                                ("claude", "--json-schema"))))
+
+        # A member that answers in schema-shaped JSON must be rendered back to prose: the
+        # chair's synthesis and --anonymize both read `answer` as text.
+        print("structured answers are rendered back to Markdown:")
+        sd = stub_dir()
+        with open(os.path.join(sd, "claude"), "w") as fh:
+            fh.write('#!/usr/bin/env python3\n'
+                     'import json,sys; sys.stdin.read()\n'
+                     'print(json.dumps({"answer":"BODY","key_points":["K1","K2"],'
+                     '"confidence":"high","caveats":["C1"]}, ensure_ascii=False))\n')
+        os.chmod(os.path.join(sd, "claude"), 0o755)
+        proc, _ = run(["--prompt", "Q", "--members", "claude"], sd)
+        res = json.loads(proc.stdout)["members"]["claude"]
+        check("prose body survives", "BODY" in res["answer"], res["answer"][:60])
+        check("key_points rendered as bullets", "- K1" in res["answer"] and "- K2" in res["answer"])
+        check("caveats rendered", "- C1" in res["answer"])
+        check("confidence rendered", "high" in res["answer"])
+        check("raw object kept under `structured`",
+              (res.get("structured") or {}).get("key_points") == ["K1", "K2"])
+
+        # A member that ignores the schema must still contribute, not be dropped.
+        sd2 = stub_dir()
+        with open(os.path.join(sd2, "claude"), "w") as fh:
+            fh.write('#!/usr/bin/env python3\n'
+                     'import sys; sys.stdin.read(); print("PLAIN PROSE")\n')
+        os.chmod(os.path.join(sd2, "claude"), 0o755)
+        proc2, _ = run(["--prompt", "Q", "--members", "claude"], sd2)
+        res2 = json.loads(proc2.stdout)["members"]["claude"]
+        check("non-JSON answer passes through unchanged", res2["answer"] == "PLAIN PROSE", res2["answer"][:40])
+        check("structured is None when the member ignored the schema", res2.get("structured") is None)
 
         print("argument validation:")
         proc, _ = run(["--workdir", os.path.join(repo, "nope"), "--prompt", "x"], stubs)
