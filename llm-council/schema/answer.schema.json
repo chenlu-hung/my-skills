@@ -1,0 +1,27 @@
+{
+  "title": "Council member answer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answer", "key_points", "confidence", "caveats"],
+  "properties": {
+    "answer": {
+      "type": "string",
+      "description": "The full answer in Markdown. This is the substance — do not summarise it away into key_points."
+    },
+    "key_points": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "The load-bearing claims, one per item, each standing on its own. Empty array if there are none."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"],
+      "description": "How much the answer should be trusted as stated."
+    },
+    "caveats": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Conditions under which the answer stops holding, or what you did not check. Empty array if none."
+    }
+  }
+}
