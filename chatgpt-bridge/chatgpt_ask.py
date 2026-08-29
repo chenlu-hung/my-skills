@@ -27,6 +27,10 @@ user. Hence opening it per call rather than leaving it on.
 
 Exit status is 0 on a captured answer, 1 otherwise. `--json` prints
 {"ok", "answer", "elapsed_s", "error"} for programmatic callers.
+
+Callers are usually agent CLIs -- Claude Code, Codex, opencode -- and two of
+those hosts restrict what may be done to the app. `--doctor` reports what this
+host allows and whether a call would get through.
 """
 import argparse
 import asyncio
@@ -154,6 +158,82 @@ def quit_app(wait=15):
     return not app_is_running()
 
 
+# --- Where this is running ----------------------------------------------------
+#
+# Calls arrive from several agent CLIs as well as from a plain shell, and two of
+# those hosts turn an ordinary call into damage. Both are checked before the app
+# is touched, because otherwise the user's app is quit and relaunched for a call
+# that was never going to reach the port.
+
+def ancestry(limit=16):
+    """Executable paths of this process's ancestors, nearest first."""
+    chain = []
+    pid = os.getppid()
+    while pid > 1 and len(chain) < limit:
+        probe = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)],
+                               capture_output=True, text=True)
+        parts = probe.stdout.strip().split(None, 1)
+        if len(parts) < 2:
+            break
+        chain.append(parts[1].strip())
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            break
+    return chain
+
+
+def host():
+    """(label, may_manage_app, why_not) for the process tree this call sits in.
+
+    Managing the app means quitting and relaunching it, which is the only way to
+    open the debugging port -- the flag is read at launch and `open --args`
+    against a running instance drops it. Two hosts must not do that:
+
+    - ChatGPT.app itself. It and the Codex desktop app are one bundle
+      (com.openai.codex), so a Codex session hosted in the app would quit the
+      window it is running in. Ancestry is the only signal; nothing in the
+      environment says so.
+    - A Codex CLI sandbox. Children inherit the seatbelt profile, so an app
+      relaunched from inside one comes up unable to write its own container.
+
+    Under either, the port has to be opened outside and this call just uses it.
+    """
+    chain = ancestry()
+    if any(p.startswith(APP_PATH + "/") for p in chain):
+        return ("ChatGPT.app", False,
+                "quitting it would kill the session making this call")
+    if os.environ.get("CODEX_SANDBOX"):
+        return ("Codex CLI (sandboxed)", False,
+                "an app relaunched inside the sandbox inherits it and cannot "
+                "write its own container")
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
+        return ("Claude Code", True, "")
+    for path in chain:
+        name = os.path.basename(path).lstrip("-")
+        if name in ("codex", "opencode"):
+            return ({"codex": "Codex CLI", "opencode": "opencode"}[name], True, "")
+    return ("shell", True, "")
+
+
+def unreachable_reason():
+    """Why nothing can work on this host at all, or None if something might."""
+    if sys.platform != "darwin":
+        return f"ChatGPT.app is macOS-only (this is {sys.platform})"
+    if os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED"):
+        return ("the Codex sandbox has networking off, so the debugging port "
+                "cannot be reached -- rerun codex with "
+                "`--sandbox danger-full-access`, or call chatgpt-ask outside Codex")
+    if not os.path.exists(APP_BINARY):
+        return f"ChatGPT.app not found at {APP_PATH}"
+    return None
+
+
+OPEN_IT_YOURSELF = ("open the port from an unrestricted shell first -- "
+                    "`chatgpt-ask --keep-app --prompt ping` leaves it open -- "
+                    "then retry here")
+
+
 def ensure_app(port, wait=45):
     """Make the debugging port answer; report whether this call is what opened it.
 
@@ -164,6 +244,12 @@ def ensure_app(port, wait=45):
     """
     if cdp_ready(port):
         return False
+    label, may_manage, why_not = host()
+    if not may_manage:
+        raise CDPError(
+            f"nothing is serving port {port}, and under {label} this call must "
+            f"not quit and relaunch the app ({why_not}) -- {OPEN_IT_YOURSELF}"
+        )
     if not os.path.exists(APP_BINARY):
         raise CDPError(f"ChatGPT.app not found at {APP_PATH}")
     if app_is_running() and not quit_app():
@@ -390,9 +476,42 @@ async def ask(prompt, timeout, port, new_chat=True, allow_history=False,
         await ws.close()
 
 
+def doctor(port):
+    """Report what this host allows, and whether a call would get through.
+
+    Worth having because the interesting failures happen before any of this
+    script's own logic runs -- a sandbox with no networking, a port nobody is
+    serving -- and each host reports them differently, or not at all.
+    """
+    label, may_manage, why_not = host()
+    blocked = unreachable_reason()
+    serving = resolve_host(port)
+    installed = os.path.exists(APP_BINARY)
+
+    def row(label, value):
+        print(f"{label:<15}: {value}")
+
+    row("host", label)
+    row("platform", sys.platform)
+    row("ChatGPT.app",
+        f"{APP_PATH} ({'running' if app_is_running() else 'not running'})"
+        if installed else "not installed")
+    row(f"port {port}", f"open on {serving}" if serving else "closed")
+    row("app management", "allowed" if may_manage else f"blocked, {why_not}")
+
+    if blocked:
+        row("verdict", f"unusable -- {blocked}")
+        return 1
+    if serving or may_manage:
+        row("verdict", "ready")
+        return 0
+    row("verdict", f"blocked -- {OPEN_IT_YOURSELF}")
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description="Ask ChatGPT.app one question over CDP.")
-    src = ap.add_mutually_exclusive_group(required=True)
+    src = ap.add_mutually_exclusive_group()
     src.add_argument("--prompt")
     src.add_argument("--prompt-file")
     ap.add_argument("--timeout", type=int, default=300, help="seconds to wait for the answer")
@@ -406,7 +525,14 @@ def main():
     ap.add_argument("--keep-app", action="store_true",
                     help="leave the app running afterwards even if this call started it "
                          "(for a run of several questions — saves a relaunch each time)")
+    ap.add_argument("--doctor", action="store_true",
+                    help="report what this host allows and exit, without asking anything")
     args = ap.parse_args()
+
+    if args.doctor:
+        sys.exit(doctor(args.port))
+    if not (args.prompt or args.prompt_file):
+        ap.error("one of --prompt or --prompt-file is required")
 
     prompt = args.prompt
     if args.prompt_file:
@@ -418,6 +544,9 @@ def main():
 
     we_started = False
     try:
+        blocked = unreachable_reason()
+        if blocked:
+            raise CDPError(blocked)
         we_started = ensure_app(args.port)
         result = asyncio.run(ask(prompt, args.timeout, args.port,
                                  new_chat=not args.keep_chat,

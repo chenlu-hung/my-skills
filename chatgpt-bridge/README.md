@@ -12,9 +12,25 @@ reach the other pool.
 ## Install
 
 ```sh
-chmod +x chatgpt_ask.py
-ln -s "$PWD/chatgpt_ask.py" ~/.local/bin/chatgpt-ask
+./install.sh
 ```
+
+This links `chatgpt_ask.py` into `~/.local/bin/chatgpt-ask` and links this
+directory in as a skill for every agent CLI on the machine that loads them:
+
+| CLI | skill directory |
+|---|---|
+| Claude Code | `~/.claude/skills/chatgpt-bridge` |
+| Codex | `~/.codex/skills/chatgpt-bridge` |
+| opencode | `~/.config/opencode/skills/chatgpt-bridge` |
+
+All three read the same `SKILL.md`, and every install is a symlink back here, so
+there is one script and one set of instructions behind all of them. The installer
+is idempotent — re-run it after an update. Removing it is `rm` on the symlinks.
+
+opencode can also auto-load `~/.claude/skills` on its own, but only while
+`OPENCODE_DISABLE_EXTERNAL_SKILLS` is unset; installing into its own directory
+does not depend on that.
 
 Requires `uv` and ChatGPT.app, signed in. The script declares its own dependency
 inline (PEP 723), so nothing else needs installing — the shebang runs it through
@@ -39,6 +55,27 @@ when an answer was captured.
 | `--keep-chat` | ask in the open thread instead of a new temporary one |
 | `--allow-history` | proceed even if temporary chat is unavailable, saving the thread to history |
 | `--port` | debugging port to use (default 9222) |
+| `--doctor` | report what the current host allows, and exit without asking anything |
+
+## Where you call it from
+
+Opening the debugging port means quitting and relaunching the app, because the
+flag is only read at launch. Two hosts must not do that, so the script reads its
+own environment and process ancestry and refuses instead:
+
+- **Inside ChatGPT.app.** It and the Codex desktop app are one bundle
+  (`com.openai.codex`), so a Codex session hosted in the app would close the
+  window it is running in.
+- **Inside a Codex CLI sandbox.** Children inherit the seatbelt profile, so an
+  app relaunched from there comes up unable to write its own container. Under
+  `workspace-write` the port is unreachable anyway — networking is off — and the
+  script reports that rather than hanging until the timeout expires.
+
+The fix is the same either way: open the port once from an ordinary shell with
+`chatgpt-ask --keep-app --prompt ping`, and the restricted call reuses it.
+
+`chatgpt-ask --doctor` prints the host, the port state, whether this call may
+manage the app, and a verdict.
 
 ## What it does to your machine
 
