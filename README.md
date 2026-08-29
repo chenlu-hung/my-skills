@@ -43,6 +43,8 @@ cp -R handoff ~/.claude/skills/
 
 > **Note**: `handoff`'s SessionStart hook must be registered separately in `~/.claude/settings.json` and references `~/.claude/skills/handoff/check-handoff.sh`. Handoffs written before per-project scoping still sit unscoped in `$TMPDIR`; the hook counts them when the current project has none, so you can file or discard them.
 >
+> To use it from another harness, **link rather than copy** — `ln -s ~/.claude/skills/handoff ~/.codex/skills/handoff` — so both installs share one copy of the scripts and one store, and a handoff written on either side resumes on the other. Only the trigger differs: Claude Code's hook offers a resume unprompted, elsewhere the user asks and the skill runs `--latest`. Without `$CLAUDE_PROJECT_DIR` the scripts key the store on the enclosing repo root (`HANDOFF_PROJECT_DIR` overrides), so a session started deep in the tree still files its handoff where the next one looks.
+>
 > **Note**: `FableAdvisor` installs under its skill name: `cp -R FableAdvisor ~/.claude/skills/fable-advisor`. It expects `grill-me` to be installed too (Phase 1 invokes it).
 >
 > **Note**: `write-register` installs via `write-register/install.sh` — it copies the skill, installs the output style to `~/.claude/output-styles/write-register.md`, sets `outputStyle` in `~/.claude/settings.json`, and retires `caveman`/`stop-slop` into `~/.claude/write-register-superseded/`. `uninstall.sh` reverts all of it (and only clears `outputStyle` if it is still `write-register`, so a style you picked later survives). The style is the part that matters: without it the skill only fires when you name it, and automatic register selection never happens.
