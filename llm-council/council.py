@@ -10,6 +10,9 @@ Each member authenticates through its own *subscription / sign-in*, not an API k
   - gemini    -> Google Antigravity CLI `agy`, Gemini models (`agy -p`)
   - claude    -> Claude Code headless (`claude -p`) — Claude as an independent member,
                  separate from the orchestrating session that chairs the council
+  - opencode  -> opencode CLI on free DeepSeek, so it costs no subscription quota
+  - chatgpt   -> the ChatGPT desktop app via `chatgpt-ask` (opt-in) — spends the
+                 conversation allowance rather than Codex quota
 
 Usage:
     python3 council.py --prompt-file q.txt                 # all members
@@ -59,7 +62,11 @@ DEFAULT_TIMEOUT = 300  # seconds, per member — matches agy's default --print-t
 DEFAULT_GEMINI_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_CODEX_MODEL = ""  # empty = whatever the ChatGPT subscription defaults to
 DEFAULT_CLAUDE_MODEL = ""  # empty = whatever the Claude subscription defaults to
-ALL_MEMBERS = "codex,gemini,claude"
+# A free slug on opencode's own provider. These come and go: the previous default
+# (opencode/deepseek-v4-flash-free) was withdrawn and every call returned a server
+# error. `opencode models | grep free` lists what is currently live.
+DEFAULT_OPENCODE_MODEL = "opencode/mimo-v2.5-free"
+ALL_MEMBERS = "codex,gemini,claude,opencode"
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")  # strip terminal color codes from CLI stdout
 
@@ -96,6 +103,21 @@ def render_structured(obj):
     if conf:
         parts.append(f"_confidence: {conf}_")
     return "\n\n".join(x for x in parts if x).strip()
+
+
+FENCED = re.compile(r"\A```[A-Za-z]*\s*\n(.*?)\n?```\s*\Z", re.S)
+
+
+def unfence(text):
+    """Strip a Markdown code fence from around a JSON payload.
+
+    Members handed a schema through the prompt rather than a flag (`opencode`,
+    `chatgpt`) wrap the object in ```json often enough to matter, and that stops
+    parse_structured at the very first character.
+    """
+    stripped = (text or "").strip()
+    match = FENCED.match(stripped)
+    return match.group(1).strip() if match else stripped
 
 
 def parse_structured(text):
@@ -301,6 +323,61 @@ def run_claude(prompt, model, timeout, workdir, borrowed, schema=None):
             "model": model or "default", "elapsed_s": elapsed, "error": err}
 
 
+def run_opencode(prompt, model, timeout, workdir, borrowed, schema=None):
+    """opencode `run` in JSON mode; the answer is the concatenation of `type:text` events.
+
+    Free DeepSeek by default, so this member costs no subscription quota — which is why
+    it is in the default set rather than opt-in.
+
+    It is refused on a borrowed workdir. The other members each have something real
+    behind their read-only promise (an OS sandbox, denied tools, plan mode); opencode
+    has no equivalent flag here, and a member that cannot be constrained should not be
+    pointed at the caller's repo just because the others can.
+
+    Schemas are requested in the prompt rather than enforced — there is no
+    `--output-schema` equivalent — and `parse_structured` degrades to prose if ignored.
+    """
+    if borrowed:
+        return {"ok": False, "answer": "", "structured": None,
+                "model": model or DEFAULT_OPENCODE_MODEL, "elapsed_s": 0,
+                "error": "opencode member has no read-only mode, so it is refused on --workdir"}
+
+    if schema:
+        prompt = (f"{prompt}\n\nRespond with ONLY a JSON object that CONFORMS to this JSON "
+                  f"Schema. Return an instance of it, not the schema itself, and emit raw "
+                  f"JSON with no code fence:\n{schema[1]}")
+
+    cmd = ["opencode", "run", "--format", "json"]
+    if model:
+        cmd += ["-m", model]
+    cmd.append(prompt)
+
+    t0 = time.time()
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=workdir,
+                          stdin=subprocess.DEVNULL)
+    elapsed = round(time.time() - t0, 1)
+
+    texts = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") == "text":
+            chunk = (obj.get("part") or {}).get("text")
+            if chunk:
+                texts.append(chunk)
+
+    answer, structured = parse_structured(unfence("\n".join(texts)))
+    ok = bool(answer) and proc.returncode == 0
+    err = "" if ok else ((proc.stderr or "").strip()[-600:] or f"exit {proc.returncode}, empty answer")
+    return {"ok": ok, "answer": answer, "structured": structured,
+            "model": model or DEFAULT_OPENCODE_MODEL, "elapsed_s": elapsed, "error": err}
+
+
 def chatgpt_ask_command():
     """How to invoke the ChatGPT bridge, or None if it isn't installed.
 
@@ -379,7 +456,7 @@ def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
         return {"ok": False, "answer": "", "structured": None, "model": "desktop app",
                 "elapsed_s": elapsed, "error": err}
 
-    raw = result.get("answer", "")
+    raw = unfence(result.get("answer", ""))
     answer, structured = parse_structured(raw)
     if schema and structured is None:
         # Asked for JSON, got JSON-shaped prose: the app writes answers as
@@ -399,10 +476,11 @@ def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
 
 
 RUNNERS = {"codex": run_codex, "gemini": run_gemini, "claude": run_claude,
-           "chatgpt": run_chatgpt}
+           "opencode": run_opencode, "chatgpt": run_chatgpt}
 
 # CLI binary each member shells out to — used for the "not installed" error message.
-CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude", "chatgpt": "chatgpt-ask"}
+CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude",
+           "opencode": "opencode", "chatgpt": "chatgpt-ask"}
 
 
 def dispatch(name, prompt, model, timeout, workdir, borrowed, schema=None):
@@ -507,6 +585,7 @@ def main():
     ap.add_argument("--no-output-schema", action="store_true",
                     help="disable structured output; every member returns free prose")
     ap.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL, help="Claude model (empty = subscription default)")
+    ap.add_argument("--opencode-model", default=DEFAULT_OPENCODE_MODEL, help="opencode model slug")
     ap.add_argument("--anonymize", metavar="STAGE1_JSON",
                     help="don't dispatch; build an anonymized cross-review prompt from a saved stage-1 JSON")
     ap.add_argument("--question-file", help="original question file (required with --anonymize)")
@@ -536,6 +615,7 @@ def main():
         "codex": args.codex_model,
         "gemini": args.gemini_model,
         "claude": args.claude_model,
+        "opencode": args.opencode_model,
         # the chatgpt member uses whatever model is selected in the app's own UI
         "chatgpt": "",
     }

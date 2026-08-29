@@ -19,7 +19,13 @@ OpenRouter.
 | **Codex** | `codex exec` | ChatGPT subscription (`auth_mode: chatgpt` in `~/.codex/auth.json`) |
 | **Gemini** | Antigravity `agy -p` | Google Antigravity sign-in (Gemini models) |
 | **Claude** | `claude -p` | Claude subscription — runs as an **independent member**, isolated from the chair |
+| **opencode** | `opencode run` | opencode's own free tier — costs no subscription quota |
 | **ChatGPT** *(opt-in)* | `chatgpt-ask`, over the desktop app's debugging port | the app's own sign-in |
+
+The free model slugs opencode offers rotate, and a withdrawn one fails every call rather
+than falling back. `opencode models | grep free` lists the live ones; the default is set in
+`DEFAULT_OPENCODE_MODEL`. This member is refused on `--workdir`: unlike the others it has no
+read-only mode to hold it to.
 
 `chatgpt` answers out of the ChatGPT **conversation** allowance rather than the Codex quota
 that `codex` spends, which is the reason to reach for it. It is opt-in because it needs setup
