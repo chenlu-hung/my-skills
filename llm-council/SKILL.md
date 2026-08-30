@@ -91,7 +91,15 @@ Three limits the CLI members don't have:
 
 ### Stage 1 — First opinions (fan-out)
 
-Write the question to a temp file, then dispatch **all** members in parallel, saving the
+**First, write the scoring criteria — before you read a single answer.** Derive three short,
+independent, question-specific criteria from the question alone and write one per line to
+`<tmp>/criteria.txt`. Once you have read the answers you cannot write an uncontaminated
+rubric: you would be choosing the yardstick to fit answers you have already formed an
+opinion about. A fixed triple is the wrong rubric for most questions anyway — "depth" means
+nothing for a factual lookup. If you cannot derive good ones, omit the file and
+`council.py` falls back to `correctness, depth, usefulness`; never block Stage 2 on this.
+
+Then write the question to a temp file and dispatch **all** members in parallel, saving the
 JSON to a file (Stage 2's anonymizer reads it from disk):
 ```sh
 python3 ~/.claude/skills/llm-council/council.py --prompt-file <tmp>/q.txt > <tmp>/stage1.json
@@ -109,7 +117,7 @@ You now hold one answer per member.
 1. **Anonymize with the script — never shuffle or relabel by hand:**
    ```sh
    python3 ~/.claude/skills/llm-council/council.py --anonymize <tmp>/stage1.json \
-       --question-file <tmp>/q.txt --members codex,claude
+       --question-file <tmp>/q.txt --members codex,claude --criteria <tmp>/criteria.txt
    ```
    It labels the usable answers `Response A / B / C / …` and writes, next to `stage1.json`,
    **one prompt per reviewer** (`review_prompt.codex.txt`, `review_prompt.claude.txt`, …)
@@ -137,10 +145,14 @@ You now hold one answer per member.
    run in parallel:
    ```sh
    python3 ~/.claude/skills/llm-council/council.py --members codex \
+       --output-schema ~/.claude/skills/llm-council/schema/review.schema.json \
        --prompt-file <tmp>/review_prompt.codex.txt > <tmp>/stage2.codex.json
    python3 ~/.claude/skills/llm-council/council.py --members claude \
+       --output-schema ~/.claude/skills/llm-council/schema/review.schema.json \
        --prompt-file <tmp>/review_prompt.claude.txt > <tmp>/stage2.claude.json
    ```
+   **The output file names matter**: `--aggregate` looks for `stage2.<reviewer>.json` beside
+   `label_map.json`.
    **A shared redirect would interleave the JSON and lose rankings** — one output file per
    reviewer, always. Check `members.<reviewer>.ok` in each; a reviewer that errored is a
    Stage-2 dropout and must be named in the council notes, exactly like a Stage-1 one. If
@@ -151,7 +163,31 @@ You now hold one answer per member.
    chosen because ranking answers well is harder than producing them and the remaining
    members are not strong enough at it.
 
-You now hold one ranking per reviewer, each over its **own** ordering of the same answers.
+3. **Aggregate — do not do this arithmetic by hand:**
+   ```sh
+   python3 ~/.claude/skills/llm-council/council.py --aggregate <tmp>/label_map.json \
+       --criteria <tmp>/criteria.txt
+   ```
+   Pass the **same** `--criteria` file as step 1; the names are validated back. It emits
+   `ranking`, per-response `mean` / `spread` / `per_criterion`, `factual_errors`, a
+   `reviewers` map saying who counted and who did not, and the `gate` that Stage 2.5 reads.
+
+   Reviewers scored *labels*, and a label means a different answer to each of them, so the
+   numbers are not comparable until this step maps them back. It also **drops each
+   reviewer's score for its own answer** — a reviewer grading itself favours itself, and
+   with a two-reviewer roster that bias no longer averages out. The resulting unequal
+   comparison counts are handled by the `w/c` normalisation, which is what that
+   normalisation is for.
+
+   Consequences worth knowing when you read the output: a reviewer's own answer is scored
+   by everyone *except* itself, so on a two-reviewer council it carries one score and its
+   `spread` is `null`. Only answers from non-reviewer members get a disagreement signal.
+   A reviewer that failed, ignored the schema, or produced unusable scores appears in
+   `reviewers` with a reason and is excluded from the arithmetic while its prose stays
+   available in its `stage2.<reviewer>.json`. If **no** reviewer was usable the command
+   exits non-zero: synthesize from the Stage-1 answers and say cross-review did not run.
+
+You now hold one aggregate over the answers themselves, not per-reviewer label soup.
 
 ### Stage 2.5 — Conditional cross-examination (`debate` only)
 
@@ -160,16 +196,21 @@ change anything** — not a free-for-all that grinds the answers into mush. Open
 questions are exactly where extra debate rounds make models converge toward whoever
 sounds most confident rather than whoever is right, so this stays surgical.
 
-1. **Gate — answer these two questions first, in writing, quoting the evidence:**
-   - **Q1**: Do the reviewers' *top picks* differ? (Reordering the middle of the ranking
-     does not count — only a conflict about which answer is best.)
-   - **Q2**: Did any reviewer allege a **specific factual/correctness error** in a specific
-     answer? Quote the allegation. ("I'd phrase it differently" or style preferences do
-     not count.)
+1. **Gate — read `gate` from the aggregate; do not re-derive it in prose.**
+   `gate.rebuttal_recommended` is true when either arm trips:
+   - **the numeric arm** — the top two answers are closer together than the reviewers
+     disagree about them (`top_two_gap` below the larger `spread` of the two). A near-tie
+     the reviewers agree on is settled; a near-tie they disagree about is not.
+     `gate.contested_criterion` names the criterion they disagree about most, when there is
+     enough data to say.
+   - **the qualitative arm** — a reviewer quoted a specific factual error, listed under
+     `factual_errors`. This arm stands alone and is never overridden by the numbers: an
+     allegation of a false claim deserves an answer whatever the scores say.
 
-   If **both** answers are "no" — the council substantively **agrees** — **skip this
-   stage**, say so in one line ("council was in consensus; no rebuttal round needed"),
-   and go straight to Stage 3. Do not manufacture a debate.
+   If `rebuttal_recommended` is false, **skip this stage**, say so in one line ("council was
+   in consensus; no rebuttal round needed"), and go to Stage 3. Do not manufacture a debate.
+   When the numeric arm cannot run — fewer than two reviewers scored the leaders — the gate
+   says so in `reasons`; fall back to the qualitative arm alone rather than guessing.
 
 2. **One rebuttal round (contested answers only).** For each answer that drew a real
    objection, send it *back to its own author* with the strongest objection(s) raised
@@ -203,11 +244,14 @@ You now hold, for each contested answer, a defend-or-concede response.
 
 ### Stage 3 — Chairman synthesis (you)
 
-Read `label_map.json` and de-anonymize **each reviewer's ranking through its own map** —
-`label_map[<reviewer>][<label>]`. The labels are not comparable across reviewers: Response A
-means a different answer to each of them. Then, as **Chairman**, write the final answer.
-In `quick` mode, and whenever cross-review did not run, there is no `label_map.json` at all
-— synthesize from Stage 1 and report no aggregate ranking rather than inventing one. You are *not* a contestant
+The aggregate from Stage 2 step 3 has already de-anonymized everything: `ranking` and
+`responses` are keyed by member. Read it rather than mapping labels yourself — `Response A`
+means a different answer to each reviewer, and doing that bookkeeping by eye is how a
+ranking silently comes out wrong. The per-reviewer prose in each `stage2.<reviewer>.json`
+is still worth reading for the *reasons*; the numbers come from the aggregate.
+In `quick` mode, and whenever cross-review did not run, there is no aggregate at all —
+synthesize from Stage 1 and report no ranking rather than inventing one. Then, as
+**Chairman**, write the final answer. You are *not* a contestant
 — weigh the rankings and the substance honestly and adopt any member's point when it's stronger;
 don't favour the `claude` member by default. In `debate` mode also weigh the Stage-2.5 round:
 a **conceded** point is settled (drop it from the answer), and a point that was **defended with
@@ -216,8 +260,10 @@ genuinely open. Present:
 
 1. **The answer** — one synthesized, authoritative response (this is the headline).
 2. **Council notes** (compact, secondary): each member's one-line stance, the aggregate
-   ranking, and any real disagreement worth flagging. In `debate` mode add a one-line
-   verdict per contested point (defended / conceded / still open). Keep it short.
+   ranking, and any real disagreement worth flagging. Give the ranking with its numbers
+   (`mean` per response) rather than as a bare order, and name any reviewer that was
+   excluded from the arithmetic and why. In `debate` mode add a one-line verdict per
+   contested point (defended / conceded / still open). Keep it short.
 
 For `raw` mode, stop after Stage 1 and show the answers side by side. For `quick`, skip
 Stage 2 and synthesize directly from the Stage-1 answers. For `debate`, run the conditional
@@ -285,6 +331,12 @@ must validate locally first.
 `structured`.** That is what makes the default safe: Stage-3 synthesis, `--anonymize`, and the
 human all keep reading prose. A member that ignores the schema passes through unchanged rather
 than being dropped.
+
+`schema/review.schema.json` is the second schema in the box: Stage 2 binds it so each
+reviewer returns a per-response, per-criterion score vector plus any quoted factual errors,
+which is what `--aggregate` consumes. Scoring each criterion independently beats one
+compound judgement — asked "is this correct?" as a single question, a verifier latches onto
+whichever factor is most salient in the prompt.
 
 `--output-schema FILE` swaps the schema (e.g. a findings shape for `review-me`);
 `--no-output-schema` turns it off entirely.

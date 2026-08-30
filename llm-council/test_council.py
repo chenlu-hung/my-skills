@@ -333,6 +333,105 @@ def main():
         finally:
             shutil.rmtree(adir, ignore_errors=True)
 
+        print("aggregate (alignment, self-preference, degradation):")
+        gdir = tempfile.mkdtemp(prefix="council-agg-")
+        try:
+            g1, gq = stage1_file(gdir, "agg", {"codex": "AAA", "gemini": "BBB", "claude": "CCC"})
+            crit = os.path.join(gdir, "crit.txt")
+            with open(crit, "w", encoding="utf-8") as fh:
+                fh.write("correctness\ndepth\n")
+            proc, out = run_raw(["--anonymize", g1, "--question-file", gq,
+                                 "--members", "codex,claude", "--criteria", crit])
+            check("criteria reach every review prompt", proc.returncode == 0 and all(
+                "- correctness" in open(v, encoding="utf-8").read()
+                for v in (out or {}).get("review_prompts", {}).values()), proc.stderr[:80])
+            check("the prompt no longer asks for a ranking", all(
+                "rank them best-to-worst" not in open(v, encoding="utf-8").read()
+                for v in (out or {}).get("review_prompts", {}).values()))
+            gmap = (out or {}).get("label_map")
+
+            def stage2(reviewer, prefs, errors_for=None):
+                labels = json.load(open(gmap, encoding="utf-8"))[reviewer]
+                reviews = [{"label": lb,
+                            "scores": [{"criterion": "correctness", "score": prefs[m][0], "reason": "r"},
+                                       {"criterion": "depth", "score": prefs[m][1], "reason": "r"}],
+                            "factual_errors": ([f"{m} said something false"]
+                                               if m == errors_for else [])}
+                           for lb, m in labels.items()]
+                with open(os.path.join(gdir, f"stage2.{reviewer}.json"), "w", encoding="utf-8") as fh:
+                    json.dump({"members": {reviewer: {"ok": True, "answer": "x", "structured":
+                                                      {"reviews": reviews}, "model": "m",
+                                                      "elapsed_s": 1, "error": ""}}}, fh)
+
+            # codex rates its own answer far above everything else.
+            stage2("codex", {"codex": (99, 99), "gemini": (60, 60), "claude": (62, 62)})
+            stage2("claude", {"codex": (61, 61), "gemini": (64, 64), "claude": (95, 95)})
+            proc, agg = run_raw(["--aggregate", gmap, "--criteria", crit])
+            check("aggregate succeeds with two reviewers",
+                  proc.returncode == 0 and (agg or {}).get("usable_reviewers") == 2, proc.stderr[:100])
+            check("each reviewer's own answer is excluded", all(
+                (agg or {})["reviewers"][r].get("own_answer_excluded") for r in ("codex", "claude")))
+            check("a self-rated answer does not win on its own vote",
+                  (agg or {})["ranking"][0] != "codex", str((agg or {}).get("ranking")))
+            check("codex's score comes only from the other reviewer",
+                  list((agg or {})["responses"]["codex"]["scored_by"]) == ["claude"],
+                  str((agg or {})["responses"]["codex"]["scored_by"]))
+            check("an answer scored by both reviewers reports a spread",
+                  (agg or {})["responses"]["gemini"]["spread"] is not None)
+            check("an answer scored once reports no spread",
+                  (agg or {})["responses"]["codex"]["spread"] is None)
+
+            # The gate: a quoted factual error is always enough on its own.
+            stage2("claude", {"codex": (61, 61), "gemini": (64, 64), "claude": (95, 95)},
+                   errors_for="gemini")
+            _, agg = run_raw(["--aggregate", gmap, "--criteria", crit])
+            check("a quoted factual error trips the gate",
+                  (agg or {})["gate"]["rebuttal_recommended"]
+                  and "gemini" in (agg or {})["factual_errors"], str((agg or {}).get("gate")))
+
+            # Degradation: each of these must cost one reviewer, never the whole run.
+            stage2("claude", {"codex": (61, 61), "gemini": (64, 64), "claude": (95, 95)})
+            os.rename(os.path.join(gdir, "stage2.claude.json"), os.path.join(gdir, "_held.json"))
+            proc, agg = run_raw(["--aggregate", gmap, "--criteria", crit])
+            check("a missing stage-2 file costs only that reviewer",
+                  proc.returncode == 0 and (agg or {}).get("usable_reviewers") == 1
+                  and not (agg or {})["reviewers"]["claude"]["ok"], str((agg or {}).get("reviewers")))
+            os.rename(os.path.join(gdir, "_held.json"), os.path.join(gdir, "stage2.claude.json"))
+
+            with open(os.path.join(gdir, "stage2.claude.json"), "w", encoding="utf-8") as fh:
+                json.dump({"members": {"claude": {"ok": True, "answer": "prose", "structured": None,
+                                                  "model": "m", "elapsed_s": 1, "error": ""}}}, fh)
+            _, agg = run_raw(["--aggregate", gmap, "--criteria", crit])
+            check("a reviewer that ignored the schema is excluded numerically, prose kept",
+                  (agg or {})["reviewers"]["claude"].get("prose_retained") is True,
+                  str((agg or {})["reviewers"]["claude"]))
+
+            labels = json.load(open(gmap, encoding="utf-8"))["claude"]
+            bad = [{"label": lb, "scores": [{"criterion": "correctness", "score": 70, "reason": "r"},
+                                            {"criterion": "elegance", "score": 60, "reason": "r"}],
+                    "factual_errors": []} for lb in labels]
+            with open(os.path.join(gdir, "stage2.claude.json"), "w", encoding="utf-8") as fh:
+                json.dump({"members": {"claude": {"ok": True, "answer": "x",
+                                                  "structured": {"reviews": bad}, "model": "m",
+                                                  "elapsed_s": 1, "error": ""}}}, fh)
+            _, agg = run_raw(["--aggregate", gmap, "--criteria", crit])
+            check("an invented criterion is rejected by name",
+                  "elegance" in (agg or {})["reviewers"]["claude"]["reason"],
+                  str((agg or {})["reviewers"]["claude"]))
+
+            os.remove(os.path.join(gdir, "stage2.codex.json"))
+            os.remove(os.path.join(gdir, "stage2.claude.json"))
+            proc, agg = run_raw(["--aggregate", gmap, "--criteria", crit])
+            check("zero usable reviewers fails loudly rather than ranking nothing",
+                  proc.returncode != 0 and "cross-review did not run" in json.dumps(agg or {}),
+                  str(agg)[:120])
+
+            proc, _ = run_raw(["--aggregate", gmap, "--anonymize", g1, "--question-file", gq])
+            check("--anonymize and --aggregate together are refused",
+                  proc.returncode != 0 and "separate stages" in proc.stderr, proc.stderr[:80])
+        finally:
+            shutil.rmtree(gdir, ignore_errors=True)
+
         print("argument validation:")
         proc, _ = run(["--workdir", os.path.join(repo, "nope"), "--prompt", "x"], stubs)
         check("missing --workdir dir is rejected", proc.returncode != 0 and "not a directory" in proc.stderr)
