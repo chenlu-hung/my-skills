@@ -503,14 +503,22 @@ def dispatch(name, prompt, model, timeout, workdir, borrowed, schema=None):
                 "elapsed_s": 0, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def anonymize(stage1_path, question_file):
-    """Turn a saved stage-1 JSON into a shuffled, relabelled cross-review prompt.
+def anonymize(stage1_path, question_file, reviewers):
+    """Turn a saved stage-1 JSON into one relabelled cross-review prompt PER REVIEWER.
 
     Doing the shuffle + labelling here (not in the orchestrating LLM) keeps the
     label→member mapping out of every prompt sent to a member — that, and not chair
     ignorance, is the guarantee. The chair holds stage1.json and can always identify an
     author by its text; `debate` mode in fact requires that, since Stage 2.5 routes a
     rebuttal back to the author before Stage 3 ever opens label_map.json.
+
+    Every reviewer gets a DIFFERENT order. One shared order would leave the reviewers'
+    position bias correlated: anonymising the answers removes brand bias, but if all
+    reviewers see the same Response A then whatever primacy/recency preference the models
+    share adds up across the council instead of cancelling. The orders are cyclic
+    rotations of one shuffle rather than independent shuffles, so each answer is spread
+    evenly over the slots — two independent shuffles of two answers coincide half the
+    time, which is exactly the small-council case this has to survive.
     """
     with open(stage1_path, encoding="utf-8") as fh:
         data = json.load(fh)
@@ -533,29 +541,37 @@ def anonymize(stage1_path, question_file):
         sys.exit("council.py: too many answers to label A–Z")
 
     random.shuffle(answered)
-    labels = string.ascii_uppercase[: len(answered)]
-    mapping = {labels[i]: m for i, (m, _) in enumerate(answered)}
-
-    blocks = "\n\n".join(f"--- Response {labels[i]} ---\n{a}" for i, (_, a) in enumerate(answered))
-    prompt = (
-        f"Question: {question}\n\n"
-        "Below are anonymous responses to this question. Evaluate each for correctness,\n"
-        "depth, and usefulness, then rank them best-to-worst with a one-line justification\n"
-        "each. If a response contains a specific factual or correctness error, quote the\n"
-        "erroneous claim and say why it is wrong.\n\n"
-        f"{blocks}\n"
-    )
-
+    n = len(answered)
+    labels = string.ascii_uppercase[:n]
     outdir = os.path.dirname(os.path.abspath(stage1_path))
-    prompt_path = os.path.join(outdir, "review_prompt.txt")
+
+    prompts, mapping = {}, {}
+    for r, reviewer in enumerate(reviewers):
+        # Rotate rather than reshuffle: every answer walks through the slots.
+        order = [answered[(i + r) % n] for i in range(n)]
+        mapping[reviewer] = {labels[i]: m for i, (m, _) in enumerate(order)}
+
+        blocks = "\n\n".join(f"--- Response {labels[i]} ---\n{a}"
+                             for i, (_, a) in enumerate(order))
+        prompt = (
+            f"Question: {question}\n\n"
+            "Below are anonymous responses to this question. Evaluate each for correctness,\n"
+            "depth, and usefulness, then rank them best-to-worst with a one-line justification\n"
+            "each. If a response contains a specific factual or correctness error, quote the\n"
+            "erroneous claim and say why it is wrong.\n\n"
+            f"{blocks}\n"
+        )
+        prompt_path = os.path.join(outdir, f"review_prompt.{reviewer}.txt")
+        with open(prompt_path, "w", encoding="utf-8") as fh:
+            fh.write(prompt)
+        prompts[reviewer] = prompt_path
+
     map_path = os.path.join(outdir, "label_map.json")
-    with open(prompt_path, "w", encoding="utf-8") as fh:
-        fh.write(prompt)
     with open(map_path, "w", encoding="utf-8") as fh:
         json.dump(mapping, fh, ensure_ascii=False, indent=2)
 
-    json.dump({"review_prompt": prompt_path, "label_map": map_path,
-               "responses": len(answered), "dropouts": dropouts},
+    json.dump({"review_prompts": prompts, "label_map": map_path,
+               "responses": n, "reviewers": list(reviewers), "dropouts": dropouts},
               sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
 
@@ -599,20 +615,30 @@ def main():
     ap.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL, help="Claude model (empty = subscription default)")
     ap.add_argument("--opencode-model", default=DEFAULT_OPENCODE_MODEL, help="opencode model slug")
     ap.add_argument("--anonymize", metavar="STAGE1_JSON",
-                    help="don't dispatch; build an anonymized cross-review prompt from a saved stage-1 JSON")
+                    help="don't dispatch; build one anonymized cross-review prompt PER "
+                         "REVIEWER from a saved stage-1 JSON. The reviewers are whatever "
+                         "--members names, so pass it explicitly")
     ap.add_argument("--question-file", help="original question file (required with --anonymize)")
     args = ap.parse_args()
+
+    # Validate the roster first: --anonymize derives one prompt FILENAME per member, so an
+    # unknown or duplicated name has to be caught before anything is written to disk.
+    members, seen = [], set()
+    for m in (x.strip() for x in args.members.split(",")):
+        if m and m not in seen:
+            seen.add(m)
+            members.append(m)
+    unknown = [m for m in members if m not in RUNNERS]
+    if unknown:
+        sys.exit(f"council.py: unknown member(s): {', '.join(unknown)} (valid: {', '.join(RUNNERS)})")
+    if not members:
+        sys.exit("council.py: --members is empty")
 
     if args.anonymize:
         if not args.question_file:
             sys.exit("council.py: --anonymize requires --question-file")
-        anonymize(args.anonymize, args.question_file)
+        anonymize(args.anonymize, args.question_file, members)
         return
-
-    members = [m.strip() for m in args.members.split(",") if m.strip()]
-    unknown = [m for m in members if m not in RUNNERS]
-    if unknown:
-        sys.exit(f"council.py: unknown member(s): {', '.join(unknown)} (valid: {', '.join(RUNNERS)})")
 
     prompt = read_prompt(args)
 

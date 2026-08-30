@@ -81,10 +81,11 @@ Three limits the CLI members don't have:
 | `/llm-council quick "<q>"` | 1 → 3 (skip cross-review) | Want multiple views fast and cheap |
 | `/llm-council raw "<q>"` | 1 only | Just show each model's answer side by side, no synthesis |
 
-> Each stage is one parallel `council.py` call (~10–60s depending on the slowest model).
-> A full run typically takes one to two minutes; `debate` adds at most one more round
-> (~30–60s) and **only when the cross-review actually surfaced disagreement** — tell the
-> user up front.
+> Stage 1 is one parallel `council.py` call (~10–60s depending on the slowest model);
+> Stage 2 is one call **per reviewer**, run in parallel, so it costs about the same wall
+> clock as one. A full run typically takes one to two minutes; `debate` adds at most one
+> more round (~30–60s) and **only when the cross-review actually surfaced disagreement** —
+> tell the user up front.
 
 ## Workflow
 
@@ -107,29 +108,50 @@ You now hold one answer per member.
 
 1. **Anonymize with the script — never shuffle or relabel by hand:**
    ```sh
-   python3 ~/.claude/skills/llm-council/council.py --anonymize <tmp>/stage1.json --question-file <tmp>/q.txt
+   python3 ~/.claude/skills/llm-council/council.py --anonymize <tmp>/stage1.json \
+       --question-file <tmp>/q.txt --members codex,claude
    ```
-   It shuffles the usable answers, labels them `Response A / B / C / …`, and writes two
-   files next to `stage1.json`: `review_prompt.txt` (the complete, self-contained review
-   prompt) and `label_map.json` (the private label→member mapping). With fewer than 2
-   usable answers it refuses and tells you to skip straight to Stage 3.
+   It labels the usable answers `Response A / B / C / …` and writes, next to `stage1.json`,
+   **one prompt per reviewer** (`review_prompt.codex.txt`, `review_prompt.claude.txt`, …)
+   plus `label_map.json`, which is now nested: `{reviewer: {label: member}}`. The stdout
+   JSON reports the prompt path for each reviewer under `review_prompts`. With fewer than 2
+   usable answers it refuses and tells you what to do instead.
+
+   **Each reviewer gets a different ordering, and that is the point.** Anonymising strips
+   brand bias, but one shared order leaves position bias *correlated*: if every reviewer
+   sees the same Response A, whatever primacy/recency preference the models have in common
+   adds up across the council instead of cancelling. The orders are cyclic rotations of one
+   shuffle, not independent shuffles — two independent shuffles of two answers coincide
+   half the time, which is exactly the small-council case this has to survive.
+
+   `--members` names the **reviewers**, who need not be the members that answered: a
+   reviewer absent from Stage 1 still gets a prompt, and an answer from a member that is
+   not a reviewer is still reviewed. Pass it explicitly; the roster is a decision, not a
+   default.
    **Never include `label_map.json` — or any member name — in anything sent to a member.**
    That, not chair ignorance, is the guarantee: you hold `stage1.json` and can always
    identify an author from its text, and `debate` mode *requires* you to, since Stage 2.5
    routes each rebuttal back to its own author. Keep the mapping out of every outgoing
    prompt; open the file itself only when you need it (Stage 2.5 routing, or Stage 3).
-2. Dispatch the generated review prompt as-is, **naming the reviewers explicitly**:
+2. Dispatch **one call per reviewer**, each with its own prompt and its own output file,
+   run in parallel:
    ```sh
-   python3 ~/.claude/skills/llm-council/council.py --members codex,claude \
-       --prompt-file <tmp>/review_prompt.txt > <tmp>/stage2.json
+   python3 ~/.claude/skills/llm-council/council.py --members codex \
+       --prompt-file <tmp>/review_prompt.codex.txt > <tmp>/stage2.codex.json
+   python3 ~/.claude/skills/llm-council/council.py --members claude \
+       --prompt-file <tmp>/review_prompt.claude.txt > <tmp>/stage2.claude.json
    ```
-   The reviewer roster is a deliberate pair — `codex` (gpt-5.6-sol) and `claude`
-   (claude-opus-5) — chosen because ranking answers well is harder than producing them, and
-   the remaining members are not strong enough at it. Without `--members` this call would
-   silently inherit `ALL_MEMBERS` and recruit `opencode` as a reviewer even when it never
-   answered in Stage 1.
+   **A shared redirect would interleave the JSON and lose rankings** — one output file per
+   reviewer, always. Check `members.<reviewer>.ok` in each; a reviewer that errored is a
+   Stage-2 dropout and must be named in the council notes, exactly like a Stage-1 one. If
+   **no** reviewer returned a usable ranking, skip to Stage 3 and synthesize from the
+   Stage-1 answers alone, saying that cross-review did not run.
 
-You now hold one ranking per member, all over the same anonymized set.
+   The roster is a deliberate pair — `codex` (gpt-5.6-sol) and `claude` (claude-opus-5) —
+   chosen because ranking answers well is harder than producing them and the remaining
+   members are not strong enough at it.
+
+You now hold one ranking per reviewer, each over its **own** ordering of the same answers.
 
 ### Stage 2.5 — Conditional cross-examination (`debate` only)
 
@@ -181,7 +203,11 @@ You now hold, for each contested answer, a defend-or-concede response.
 
 ### Stage 3 — Chairman synthesis (you)
 
-Now (and only now) read `label_map.json` to de-anonymize, then as **Chairman** write the final answer. You are *not* a contestant
+Read `label_map.json` and de-anonymize **each reviewer's ranking through its own map** —
+`label_map[<reviewer>][<label>]`. The labels are not comparable across reviewers: Response A
+means a different answer to each of them. Then, as **Chairman**, write the final answer.
+In `quick` mode, and whenever cross-review did not run, there is no `label_map.json` at all
+— synthesize from Stage 1 and report no aggregate ranking rather than inventing one. You are *not* a contestant
 — weigh the rankings and the substance honestly and adopt any member's point when it's stronger;
 don't favour the `claude` member by default. In `debate` mode also weigh the Stage-2.5 round:
 a **conceded** point is settled (drop it from the answer), and a point that was **defended with
@@ -275,10 +301,12 @@ until the member returns an error string instead of an answer:
 
 ## Rules
 
-- **Anonymity is the point.** The `--anonymize` mode owns the shuffle and the labels —
-  never rebuild the review prompt by hand, never open `label_map.json` before Stage 3, and
-  never leak the A/B/C → member mapping (or any member name) into a member's prompt;
-  it exists to strip brand bias from the rankings.
+- **Anonymity is the point.** The `--anonymize` mode owns the orderings and the labels —
+  never rebuild a review prompt by hand and never leak the A/B/C → member mapping (or any
+  member name) into a member's prompt. That leak is the thing the rule forbids; the chair
+  reading the map is not, and `debate` mode requires it before Stage 3. Stripping brand bias
+  is why the labels exist; giving each reviewer a different ordering is why the position
+  bias does not survive either.
 - **Members only via `council.py`** — it runs each in a throwaway temp dir (codex additionally
   in a read-only sandbox; `claude` with `--setting-sources project`) so they can't touch the
   user's repo or inherit this session's hooks/memory while answering.

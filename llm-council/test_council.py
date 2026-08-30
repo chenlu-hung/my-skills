@@ -82,19 +82,21 @@ def run_raw(args):
         return proc, None
 
 
-def stage1_file(dirpath, ok_answers, failed=(), blank=()):
+def stage1_file(dirpath, tag, ok_answers, failed=(), blank=()):
     """Write a stage-1 JSON. `ok_answers` is {member: answer}; `failed` members carry an
-    error; `blank` members are ok but answered with whitespace only."""
+    error; `blank` members are ok but answered with whitespace only. `tag` keeps each
+    fixture in its own file — reusing one name lets a later fixture silently replace an
+    earlier one that a later assertion still refers to."""
     members = {m: {"ok": True, "answer": a, "model": "m", "elapsed_s": 1, "error": ""}
                for m, a in ok_answers.items()}
     for m in failed:
         members[m] = {"ok": False, "answer": "", "model": "m", "elapsed_s": 0, "error": "boom"}
     for m in blank:
         members[m] = {"ok": True, "answer": "   ", "model": "m", "elapsed_s": 1, "error": ""}
-    path = os.path.join(dirpath, "stage1.json")
+    path = os.path.join(dirpath, f"stage1.{tag}.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"members": members}, fh, ensure_ascii=False)
-    qpath = os.path.join(dirpath, "q.txt")
+    qpath = os.path.join(dirpath, f"q.{tag}.txt")
     with open(qpath, "w", encoding="utf-8") as fh:
         fh.write("THE QUESTION")
     return path, qpath
@@ -232,62 +234,102 @@ def main():
         print("anonymize (characterisation — pins behaviour a rewrite must preserve):")
         adir = tempfile.mkdtemp(prefix="council-anon-")
         try:
-            s1, q = stage1_file(adir, {"codex": "ANSWER-CODEX", "claude": "ANSWER-CLAUDE"})
-            proc, out = run_raw(["--anonymize", s1, "--question-file", q])
+            s1, q = stage1_file(adir, "pair", {"codex": "ANSWER-CODEX", "claude": "ANSWER-CLAUDE"})
+            proc, out = run_raw(["--anonymize", s1, "--question-file", q,
+                                 "--members", "codex,claude"])
             check("2 usable answers is enough to cross-review", proc.returncode == 0, proc.stderr[:80])
             check("reports the number of responses", (out or {}).get("responses") == 2)
-            prompt_path = (out or {}).get("review_prompt") or ""
+            prompts = (out or {}).get("review_prompts") or {}
             map_path = (out or {}).get("label_map") or ""
-            check("both artifacts land next to stage1.json",
-                  os.path.dirname(prompt_path) == adir and os.path.dirname(map_path) == adir)
-            prompt = open(prompt_path, encoding="utf-8").read()
+            check("one prompt per reviewer", sorted(prompts) == ["claude", "codex"], str(prompts))
+            check("all artifacts land next to stage1.json",
+                  os.path.dirname(map_path) == adir
+                  and all(os.path.dirname(v) == adir for v in prompts.values()))
+            texts = {r: open(v, encoding="utf-8").read() for r, v in prompts.items()}
             mapping = json.load(open(map_path, encoding="utf-8"))
 
-            # The anonymity guarantee itself: this is what the whole staging exists for.
-            check("review prompt names no member", not any(
-                n in prompt for n in ("codex", "claude", "gemini", "opencode", "chatgpt")), prompt[:80])
-            check("review prompt carries the question", "THE QUESTION" in prompt)
-            check("review prompt carries every answer",
-                  "ANSWER-CODEX" in prompt and "ANSWER-CLAUDE" in prompt)
-            check("labels are A.. in order", "Response A" in prompt and "Response B" in prompt)
-            check("label map covers exactly the usable members",
-                  sorted(mapping.values()) == ["claude", "codex"], str(mapping))
-            check("label map keys are the labels used", sorted(mapping) == ["A", "B"], str(mapping))
+            # The anonymity guarantee itself: this is what the whole staging exists for,
+            # and it has to hold for EVERY reviewer's prompt, not just the first.
+            check("no reviewer's prompt names a member", not any(
+                n in txt for txt in texts.values()
+                for n in ("codex", "claude", "gemini", "opencode", "chatgpt")))
+            check("every prompt carries the question",
+                  all("THE QUESTION" in txt for txt in texts.values()))
+            check("every prompt carries every answer",
+                  all("ANSWER-CODEX" in txt and "ANSWER-CLAUDE" in txt for txt in texts.values()))
+            check("labels are A.. in order",
+                  all("Response A" in txt and "Response B" in txt for txt in texts.values()))
+
+            # The point of Change 1: reviewers must NOT share an ordering, or their
+            # position bias stays correlated across the council.
+            check("reviewers get different orderings", texts["codex"] != texts["claude"],
+                  "both reviewers saw the same Response A")
+            check("label map is nested per reviewer",
+                  sorted(mapping) == ["claude", "codex"], str(mapping))
+            check("each reviewer's map covers the same members",
+                  all(sorted(mapping[r].values()) == ["claude", "codex"] for r in mapping),
+                  str(mapping))
+            check("each reviewer's map keys are its labels",
+                  all(sorted(mapping[r]) == ["A", "B"] for r in mapping), str(mapping))
+            check("the two reviewers' maps actually differ",
+                  mapping["codex"] != mapping["claude"], str(mapping))
 
             # Dropouts are reported but never labelled.
-            s1b, qb = stage1_file(adir, {"codex": "A1", "claude": "A2", "gemini": "A3"},
+            s1b, qb = stage1_file(adir, "drop", {"codex": "A1", "claude": "A2", "gemini": "A3"},
                                   failed=("opencode",), blank=("chatgpt",))
-            proc, out = run_raw(["--anonymize", s1b, "--question-file", qb])
+            proc, out = run_raw(["--anonymize", s1b, "--question-file", qb,
+                                 "--members", "codex,claude"])
             check("failed and blank members are reported as dropouts",
                   sorted((out or {}).get("dropouts") or []) == ["chatgpt", "opencode"], str(out))
             check("only usable answers are labelled", (out or {}).get("responses") == 3)
 
             # Cardinality guards.
-            s1c, qc = stage1_file(adir, {"codex": "ONLY"})
-            proc, _ = run_raw(["--anonymize", s1c, "--question-file", qc])
+            s1c, qc = stage1_file(adir, "one", {"codex": "ONLY"})
+            proc, _ = run_raw(["--anonymize", s1c, "--question-file", qc, "--members", "codex,claude"])
             check("1 usable answer is refused", proc.returncode != 0)
             check("the 1-answer message says an answer survived",
                   "1 usable answer" in proc.stderr, proc.stderr[:120])
 
-            s1d, qd = stage1_file(adir, {}, failed=("codex", "claude"))
-            proc, _ = run_raw(["--anonymize", s1d, "--question-file", qd])
+            s1d, qd = stage1_file(adir, "none", {}, failed=("codex", "claude"))
+            proc, _ = run_raw(["--anonymize", s1d, "--question-file", qd, "--members", "codex,claude"])
             check("0 usable answers is refused", proc.returncode != 0)
             check("the 0-answer message does not tell the caller to synthesize",
                   "no usable answers" in proc.stderr and "synthesize directly" not in proc.stderr,
                   proc.stderr[:120])
 
-            s1e, qe = stage1_file(adir, {f"m{i}": f"A{i}" for i in range(26)})
-            proc, out = run_raw(["--anonymize", s1e, "--question-file", qe])
+            s1e, qe = stage1_file(adir, "cap26", {f"m{i}": f"A{i}" for i in range(26)})
+            proc, out = run_raw(["--anonymize", s1e, "--question-file", qe, "--members", "codex,claude"])
             check("26 answers still label A-Z", proc.returncode == 0 and (out or {}).get("responses") == 26,
                   proc.stderr[:80])
-            s1f, qf = stage1_file(adir, {f"m{i}": f"A{i}" for i in range(27)})
-            proc, _ = run_raw(["--anonymize", s1f, "--question-file", qf])
+            s1f, qf = stage1_file(adir, "cap27", {f"m{i}": f"A{i}" for i in range(27)})
+            proc, _ = run_raw(["--anonymize", s1f, "--question-file", qf, "--members", "codex,claude"])
             check("27 answers are refused", proc.returncode != 0 and "too many" in proc.stderr,
                   proc.stderr[:80])
 
             proc, _ = run_raw(["--anonymize", s1, "--prompt", "x"])
             check("--anonymize without --question-file is rejected",
                   proc.returncode != 0 and "requires --question-file" in proc.stderr)
+
+            # A reviewer need not have answered: the roster is named, not derived.
+            proc, out = run_raw(["--anonymize", s1, "--question-file", q, "--members", "gemini"])
+            check("a reviewer absent from stage 1 still gets a prompt",
+                  proc.returncode == 0 and sorted((out or {}).get("review_prompts") or {}) == ["gemini"],
+                  str(out))
+
+            # Roster validation has to happen BEFORE any member-derived filename is written.
+            before = {f for f in os.listdir(adir) if f.startswith("review_prompt.")}
+            proc, _ = run_raw(["--anonymize", s1, "--question-file", q, "--members", "nosuch"])
+            check("an unknown reviewer is rejected by --anonymize",
+                  proc.returncode != 0 and "unknown member" in proc.stderr, proc.stderr[:80])
+            after = {f for f in os.listdir(adir) if f.startswith("review_prompt.")}
+            check("a rejected roster writes no prompt files", after == before, str(after - before))
+            proc, _ = run_raw(["--anonymize", s1, "--question-file", q, "--members", ",,"])
+            check("an empty roster is rejected",
+                  proc.returncode != 0 and "--members is empty" in proc.stderr, proc.stderr[:80])
+            proc, out = run_raw(["--anonymize", s1, "--question-file", q,
+                                 "--members", "codex,codex,claude"])
+            check("a duplicated reviewer is deduplicated",
+                  (out or {}).get("reviewers") == ["codex", "claude"], str(out))
         finally:
             shutil.rmtree(adir, ignore_errors=True)
 
