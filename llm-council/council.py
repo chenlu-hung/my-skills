@@ -22,7 +22,8 @@ Usage:
         # members run *in* that repo so they can read real files (review work);
         # they are hardened read-only and the directory is never deleted
     python3 council.py --anonymize stage1.json --question-file q.txt
-        # no dispatch: shuffle + relabel the stage-1 answers deterministically,
+        # no dispatch: shuffle + relabel the stage-1 answers (unseeded, so the
+        # labelling differs run to run),
         # write review_prompt.txt (self-contained cross-review prompt) and
         # label_map.json (private label→member mapping) next to stage1.json
 
@@ -60,8 +61,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_TIMEOUT = 300  # seconds, per member — matches agy's default --print-timeout
 DEFAULT_GEMINI_MODEL = "Gemini 3.1 Pro (High)"
-DEFAULT_CODEX_MODEL = ""  # empty = whatever the ChatGPT subscription defaults to
-DEFAULT_CLAUDE_MODEL = ""  # empty = whatever the Claude subscription defaults to
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"  # pinned: the reviewer roster names it explicitly.
+# Verified to be accepted under ChatGPT auth — the HTTP 400 documented in SKILL.md is
+# specific to the `gpt-5-codex` slug, not to pinning a model. `model_reasoning_effort`
+# is still inherited from ~/.codex/config.toml and is NOT pinned here.
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"  # pinned: the reviewer roster names it explicitly
 # A free slug on opencode's own provider. These come and go: the previous default
 # (opencode/deepseek-v4-flash-free) was withdrawn and every call returned a server
 # error. `opencode models | grep free` lists what is currently live.
@@ -488,22 +492,25 @@ def dispatch(name, prompt, model, timeout, workdir, borrowed, schema=None):
     try:
         return RUNNERS[name](prompt, model, timeout, workdir, borrowed, schema=schema)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "answer": "", "model": model or "default", "elapsed_s": timeout,
-                "error": f"timed out after {timeout}s"}
+        return {"ok": False, "answer": "", "structured": None, "model": model or "default",
+                "elapsed_s": timeout, "error": f"timed out after {timeout}s"}
     except FileNotFoundError:
-        return {"ok": False, "answer": "", "model": model or "default", "elapsed_s": 0,
+        return {"ok": False, "answer": "", "structured": None, "model": model or "default",
+                "elapsed_s": 0,
                 "error": f"`{CLI_BIN[name]}` not found on PATH — is the CLI installed and signed in?"}
     except Exception as exc:  # noqa: BLE001 — surface anything else as a member error
-        return {"ok": False, "answer": "", "model": model or "default", "elapsed_s": 0,
-                "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": False, "answer": "", "structured": None, "model": model or "default",
+                "elapsed_s": 0, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def anonymize(stage1_path, question_file):
     """Turn a saved stage-1 JSON into a shuffled, relabelled cross-review prompt.
 
-    Doing the shuffle + labelling here (not in the orchestrating LLM) means the
-    label→member mapping never has to enter the chair's context before synthesis,
-    so it cannot leak into a reviewer prompt.
+    Doing the shuffle + labelling here (not in the orchestrating LLM) keeps the
+    label→member mapping out of every prompt sent to a member — that, and not chair
+    ignorance, is the guarantee. The chair holds stage1.json and can always identify an
+    author by its text; `debate` mode in fact requires that, since Stage 2.5 routes a
+    rebuttal back to the author before Stage 3 ever opens label_map.json.
     """
     with open(stage1_path, encoding="utf-8") as fh:
         data = json.load(fh)
@@ -514,9 +521,14 @@ def anonymize(stage1_path, question_file):
     answered = [(m, (r.get("answer") or "").strip()) for m, r in members.items()
                 if r.get("ok") and (r.get("answer") or "").strip()]
     dropouts = sorted(set(members) - {m for m, _ in answered})
+    if not answered:
+        sys.exit("council.py: no usable answers in stage 1 — every member failed or "
+                 "answered blank. There is no council answer to give: report the "
+                 "dropouts and stop. Do NOT synthesize.")
     if len(answered) < 2:
-        sys.exit("council.py: fewer than 2 usable answers — nothing to cross-review; "
-                 "skip Stage 2 and synthesize directly from the answers you have")
+        sys.exit(f"council.py: only 1 usable answer ({answered[0][0]}) — nothing to "
+                 "cross-review; skip Stage 2 and synthesize from that single answer, "
+                 "saying in the council notes that the rest dropped out")
     if len(answered) > len(string.ascii_uppercase):
         sys.exit("council.py: too many answers to label A–Z")
 

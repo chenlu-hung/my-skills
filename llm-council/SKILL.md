@@ -37,8 +37,10 @@ this skill never passes `--workdir`, so no member can see the user's repo (see R
 a member answer, because the `claude` member already carries Claude's independent voice (run
 with `--setting-sources project` so the session's hooks/memory don't leak into it). The CLIs
 are stateless one-shot calls, so every prompt must be self-contained. `council.py` defaults to
-`codex,gemini,claude`; pass `--members` to change that (`--members chatgpt,gemini,claude`
-swaps Codex out for the desktop app when Codex quota is what's being conserved).
+**`codex,gemini,claude,opencode`** (`ALL_MEMBERS`); pass `--members` to change that
+(`--members chatgpt,gemini,claude` swaps Codex out for the desktop app when Codex quota is
+what's being conserved). Stage 2 names its reviewers explicitly rather than taking this
+default — see Stage 2.
 
 ## The ChatGPT member
 
@@ -94,7 +96,9 @@ JSON to a file (Stage 2's anonymizer reads it from disk):
 python3 ~/.claude/skills/llm-council/council.py --prompt-file <tmp>/q.txt > <tmp>/stage1.json
 ```
 Check `members.<name>.ok` in the JSON. If a member has `ok: false`, note who dropped out
-(e.g. CLI not installed / not signed in) and continue with whoever answered. You do **not**
+(e.g. CLI not installed / not signed in) and continue with whoever answered. **If *every*
+member failed, stop**: report the dropouts and say there is no council answer. Do not
+synthesize one from nothing — a council of zero is not a small council. You do **not**
 add your own answer here — the `claude` member already represents Claude independently.
 
 You now hold one answer per member.
@@ -109,12 +113,21 @@ You now hold one answer per member.
    files next to `stage1.json`: `review_prompt.txt` (the complete, self-contained review
    prompt) and `label_map.json` (the private label→member mapping). With fewer than 2
    usable answers it refuses and tells you to skip straight to Stage 3.
-   **Do not open `label_map.json` until Stage 3**, and never include it (or any member
-   name) in anything sent to a member.
-2. Dispatch the generated review prompt as-is:
+   **Never include `label_map.json` — or any member name — in anything sent to a member.**
+   That, not chair ignorance, is the guarantee: you hold `stage1.json` and can always
+   identify an author from its text, and `debate` mode *requires* you to, since Stage 2.5
+   routes each rebuttal back to its own author. Keep the mapping out of every outgoing
+   prompt; open the file itself only when you need it (Stage 2.5 routing, or Stage 3).
+2. Dispatch the generated review prompt as-is, **naming the reviewers explicitly**:
    ```sh
-   python3 ~/.claude/skills/llm-council/council.py --prompt-file <tmp>/review_prompt.txt > <tmp>/stage2.json
+   python3 ~/.claude/skills/llm-council/council.py --members codex,claude \
+       --prompt-file <tmp>/review_prompt.txt > <tmp>/stage2.json
    ```
+   The reviewer roster is a deliberate pair — `codex` (gpt-5.6-sol) and `claude`
+   (claude-opus-5) — chosen because ranking answers well is harder than producing them, and
+   the remaining members are not strong enough at it. Without `--members` this call would
+   silently inherit `ALL_MEMBERS` and recruit `opencode` as a reviewer even when it never
+   answered in Stage 1.
 
 You now hold one ranking per member, all over the same anonymized set.
 
@@ -142,8 +155,11 @@ sounds most confident rather than whoever is right, so this stays surgical.
    objected). Dispatch one `council.py` call per contested author so each prompt stays
    self-contained:
    ```sh
-   python3 ~/.claude/skills/llm-council/council.py --members <author> --prompt-file <rebuttal.txt>
+   python3 ~/.claude/skills/llm-council/council.py --members <author> \
+       --prompt-file <tmp>/rebuttal_<author>.txt > <tmp>/rebuttal_<author>.json
    ```
+   **Give every call its own output file.** These run in parallel, so a shared redirect
+   interleaves their JSON and loses answers.
    Rebuttal prompt shape:
    ```
    Question: <original question>
@@ -224,13 +240,20 @@ as `ok: false` and the council proceeds with the rest.
 ### Structured output is ON by default
 
 Every member is bound to `schema/answer.schema.json` (`answer`, `key_points`, `confidence`,
-`caveats`). All three CLIs support it, so members stay comparable:
+`caveats`), so members stay comparable. **Three CLIs enforce it; two only get asked:**
 
 | member | flag | shape |
 |---|---|---|
 | codex | `--output-schema <FILE>` | the `-o` file holds raw JSON |
 | agy | `--json-schema <FILE>` **plus `--output-format json`** — it refuses the schema otherwise | envelope, parsed object under `structured_output` |
 | claude | `--json-schema '<inline JSON>'` — **a path is rejected** | stdout is raw JSON |
+| opencode | *none — no `--output-schema` equivalent exists* | the schema is appended to the prompt; conformance is voluntary |
+| chatgpt | *none — a GUI has no such flag* | same: appended to the prompt, prose accepted back |
+
+`opencode` is in the default roster, so a default run already contains one member whose
+structure is unenforced. `parse_structured()` does `json.loads` and no validation, which is
+harmless while the fields are prose — but anything that does *arithmetic* on member output
+must validate locally first.
 
 **The JSON is rendered straight back to Markdown into `answer`, with the raw object kept under
 `structured`.** That is what makes the default safe: Stage-3 synthesis, `--anonymize`, and the

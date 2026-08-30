@@ -72,6 +72,34 @@ def run(args, stubs, stdin_text=""):
     return proc, parsed
 
 
+def run_raw(args):
+    """Run council.py and return (proc, parsed stdout JSON or None). For modes like
+    --anonymize that do not dispatch and so emit no `members` envelope."""
+    proc = subprocess.run([sys.executable, COUNCIL, *args], capture_output=True, text=True)
+    try:
+        return proc, json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return proc, None
+
+
+def stage1_file(dirpath, ok_answers, failed=(), blank=()):
+    """Write a stage-1 JSON. `ok_answers` is {member: answer}; `failed` members carry an
+    error; `blank` members are ok but answered with whitespace only."""
+    members = {m: {"ok": True, "answer": a, "model": "m", "elapsed_s": 1, "error": ""}
+               for m, a in ok_answers.items()}
+    for m in failed:
+        members[m] = {"ok": False, "answer": "", "model": "m", "elapsed_s": 0, "error": "boom"}
+    for m in blank:
+        members[m] = {"ok": True, "answer": "   ", "model": "m", "elapsed_s": 1, "error": ""}
+    path = os.path.join(dirpath, "stage1.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"members": members}, fh, ensure_ascii=False)
+    qpath = os.path.join(dirpath, "q.txt")
+    with open(qpath, "w", encoding="utf-8") as fh:
+        fh.write("THE QUESTION")
+    return path, qpath
+
+
 def val(argv, flag):
     """Value following `flag`, or None if the flag is absent."""
     return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
@@ -193,6 +221,75 @@ def main():
         res2 = json.loads(proc2.stdout)["members"]["claude"]
         check("non-JSON answer passes through unchanged", res2["answer"] == "PLAIN PROSE", res2["answer"][:40])
         check("structured is None when the member ignored the schema", res2.get("structured") is None)
+
+        print("pinned reviewer models (the roster decision, not a default):")
+        _, mm = run(["--prompt", "Q", "--members", "codex,claude"], stubs)
+        check("codex is pinned to gpt-5.6-sol", val(mm["codex"][0], "-m") == "gpt-5.6-sol",
+              str(mm["codex"][0][:10]))
+        check("claude is pinned to claude-opus-5", val(mm["claude"][0], "--model") == "claude-opus-5",
+              str(mm["claude"][0][:6]))
+
+        print("anonymize (characterisation — pins behaviour a rewrite must preserve):")
+        adir = tempfile.mkdtemp(prefix="council-anon-")
+        try:
+            s1, q = stage1_file(adir, {"codex": "ANSWER-CODEX", "claude": "ANSWER-CLAUDE"})
+            proc, out = run_raw(["--anonymize", s1, "--question-file", q])
+            check("2 usable answers is enough to cross-review", proc.returncode == 0, proc.stderr[:80])
+            check("reports the number of responses", (out or {}).get("responses") == 2)
+            prompt_path = (out or {}).get("review_prompt") or ""
+            map_path = (out or {}).get("label_map") or ""
+            check("both artifacts land next to stage1.json",
+                  os.path.dirname(prompt_path) == adir and os.path.dirname(map_path) == adir)
+            prompt = open(prompt_path, encoding="utf-8").read()
+            mapping = json.load(open(map_path, encoding="utf-8"))
+
+            # The anonymity guarantee itself: this is what the whole staging exists for.
+            check("review prompt names no member", not any(
+                n in prompt for n in ("codex", "claude", "gemini", "opencode", "chatgpt")), prompt[:80])
+            check("review prompt carries the question", "THE QUESTION" in prompt)
+            check("review prompt carries every answer",
+                  "ANSWER-CODEX" in prompt and "ANSWER-CLAUDE" in prompt)
+            check("labels are A.. in order", "Response A" in prompt and "Response B" in prompt)
+            check("label map covers exactly the usable members",
+                  sorted(mapping.values()) == ["claude", "codex"], str(mapping))
+            check("label map keys are the labels used", sorted(mapping) == ["A", "B"], str(mapping))
+
+            # Dropouts are reported but never labelled.
+            s1b, qb = stage1_file(adir, {"codex": "A1", "claude": "A2", "gemini": "A3"},
+                                  failed=("opencode",), blank=("chatgpt",))
+            proc, out = run_raw(["--anonymize", s1b, "--question-file", qb])
+            check("failed and blank members are reported as dropouts",
+                  sorted((out or {}).get("dropouts") or []) == ["chatgpt", "opencode"], str(out))
+            check("only usable answers are labelled", (out or {}).get("responses") == 3)
+
+            # Cardinality guards.
+            s1c, qc = stage1_file(adir, {"codex": "ONLY"})
+            proc, _ = run_raw(["--anonymize", s1c, "--question-file", qc])
+            check("1 usable answer is refused", proc.returncode != 0)
+            check("the 1-answer message says an answer survived",
+                  "1 usable answer" in proc.stderr, proc.stderr[:120])
+
+            s1d, qd = stage1_file(adir, {}, failed=("codex", "claude"))
+            proc, _ = run_raw(["--anonymize", s1d, "--question-file", qd])
+            check("0 usable answers is refused", proc.returncode != 0)
+            check("the 0-answer message does not tell the caller to synthesize",
+                  "no usable answers" in proc.stderr and "synthesize directly" not in proc.stderr,
+                  proc.stderr[:120])
+
+            s1e, qe = stage1_file(adir, {f"m{i}": f"A{i}" for i in range(26)})
+            proc, out = run_raw(["--anonymize", s1e, "--question-file", qe])
+            check("26 answers still label A-Z", proc.returncode == 0 and (out or {}).get("responses") == 26,
+                  proc.stderr[:80])
+            s1f, qf = stage1_file(adir, {f"m{i}": f"A{i}" for i in range(27)})
+            proc, _ = run_raw(["--anonymize", s1f, "--question-file", qf])
+            check("27 answers are refused", proc.returncode != 0 and "too many" in proc.stderr,
+                  proc.stderr[:80])
+
+            proc, _ = run_raw(["--anonymize", s1, "--prompt", "x"])
+            check("--anonymize without --question-file is rejected",
+                  proc.returncode != 0 and "requires --question-file" in proc.stderr)
+        finally:
+            shutil.rmtree(adir, ignore_errors=True)
 
         print("argument validation:")
         proc, _ = run(["--workdir", os.path.join(repo, "nope"), "--prompt", "x"], stubs)
