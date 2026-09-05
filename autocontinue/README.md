@@ -110,6 +110,16 @@ checker 偵測到 reset 已過
 
 ## 已知限制與校準
 
+- 就地等待成功後，那條 entry 轉成 `armed`，checker 不再管它。若那個等待之後被取消（你按了 Esc、
+  在輸入框打了字、或 Claude Code 自己的連續 rearm 上限到了），**沒有人會接手**：entry 會一直停在
+  `armed`，直到 `inject_ttl_sec` 到期退役到 `done/`。也就是退化成「什麼都沒發生」——跟沒裝
+  autocontinue 一樣，不會更糟，但也救不回來。要完全不依賴它就把 `arm_builtin` 設成 `false`。
+- armer 只在 hook 拿得到 `KITTY_WINDOW_ID` + `KITTY_LISTEN_ON` 時才會啟動，條件跟下面 inject 模式
+  相同（kitty、遠端控制已開、視窗是重啟 kitty 之後才開的）。條件不滿足就直接走佇列，不會有動作。
+- 真實對話框的畫面形狀（游標字元、清單環不環繞、開啟時輸入框還畫不畫）只有真的撞到上限才驗得了。
+  形狀不符時 armer 會按 Esc 退出，並在 `logs/arm.log` 留下具名的失敗代碼（`no_dialog`／`lost_dialog`／
+  `no_move`／`not_reached`／`unconfirmed`／`input_busy`），照著代碼對 `autocontinue_arm.py` 的
+  `drive()` 就知道卡在哪一步。
 - StopFailure payload 實測欄位：error kind 在 `error`（值 `rate_limit`），可讀訊息（含 reset
   時間）在 `last_assistant_message`，格式如 `You've hit your session limit · resets 2:50am
   (Asia/Taipei)`；hook 同時相容假設過的 `error_type` / `error_message` 欄名。解析器支援
