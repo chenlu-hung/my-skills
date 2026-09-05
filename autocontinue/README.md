@@ -7,7 +7,12 @@ Claude Code 撞到 usage limit 時，在額度 reset 後自動接續原任務。
 ```
 claude session 撞 limit
   └─ StopFailure hook (matcher: rate_limit)
-       └─ 寫入佇列 ~/.claude/autocontinue/queue/<root_id>.json + macOS 通知
+       ├─ 寫入佇列 ~/.claude/autocontinue/queue/<root_id>.json + macOS 通知
+       └─ armer：在原 kitty 視窗打 /rate-limit-options，選「Wait here, then
+          continue automatically …」，把等待交還給 Claude Code 自己
+            ├─ 成功 → entry 轉 armed，checker 不再碰它；重置後由那個 session 就地續跑
+            └─ 失敗（沒有 kitty 遠端控制／視窗已關／畫面不如預期）→ entry 留在
+               waiting，照下面的 launchd 路徑走
 launchd agent（每 5 分鐘；Mac 睡著就跟著睡，醒來補跑）
   └─ checker：全域 lock 序列化，依中斷順序檢查佇列
        └─ reset 時間已過 → claude --resume <session_id> -p "繼續…"
@@ -17,12 +22,31 @@ launchd agent（每 5 分鐘；Mac 睡著就跟著睡，醒來補跑）
             └─ 連鎖達上限（預設 10 次）→ 放棄 + 通知
 ```
 
-設計決策：headless resume 同一 session（原 TUI 會 stale，回來可 `claude --resume` 接手）、不
-用 caffeinate（睡眠期間零進度，醒來補跑）、撞 limit／復活／放棄三事件都發通知。
+設計決策：能就地等待就不要復活（見下），headless resume 同一 session（原 TUI 會 stale，回來可
+`claude --resume` 接手）、不用 caffeinate（睡眠期間零進度，醒來補跑）、撞 limit／復活／放棄三事件
+都發通知。
+
+## 為什麼先試「就地等待」
+
+Claude Code 本來就會在額度重置後自己接續，撞上限時會顯示
+`Usage limit reached · continuing automatically at … · esc to cancel`。但這個排程在某些帳號上
+不會自動觸發：限制訊息出現、session 停住，那行通知從頭到尾沒出現過。功能本身是好的——
+`/rate-limit-options` 選單裡的「Wait here, then continue automatically …」啟動的正是同一套等待，
+只是要人手動選。
+
+armer 就是去替你選那一項。這條路比排隊復活便宜得多：session 原地活著，context、權限模式、
+prompt cache 全部保留，重置時什麼都不用跑。所以 hook 一律先試它，失敗才落到佇列。
+
+代價是它靠 kitty 遠端控制去操作你的 TUI，所以做得很保守：`send-key` 就算沒送到任何視窗也一律
+回報成功，因此每一步都用 `get-text` 回讀畫面確認，而不是看 return code。輸入框裡若已經有你打到
+一半的字就直接放棄（不覆蓋、不誤送），選單沒出現、找不到目標項、或高亮走不到目標，一律按 Esc
+退出並讓佇列接手。導航邏輯用假終端機測過（`python3 tests/test_arm.py`），涵蓋目標在高亮下方／
+上方、清單不環繞、已經排程過、輸入框有殘字、選單沒開這幾種情況。
 
 ## 省成本
 
-reset 常在數小時後才發生，那時 prompt cache 早已過期（預設 5 分鐘、最長 1 小時），所以
+就地等待完全沒有這個問題（session 沒有重啟，什麼都不用重讀）；下面講的是它失敗、落到佇列復活
+時的成本。reset 常在數小時後才發生，那時 prompt cache 早已過期（預設 5 分鐘、最長 1 小時），所以
 `claude --resume` 會把整份 transcript 以**全價 input** 重讀一次；連鎖復活時這份歷史還會越滾越大。
 兩個可調的槓桿（都在 `config.json`）：
 
@@ -78,9 +102,9 @@ checker 偵測到 reset 已過
 | 路徑 | 用途 |
 |---|---|
 | `~/.claude/autocontinue/queue/` | 待復活佇列（每 session 一檔） |
-| `~/.claude/autocontinue/config.json` | 可調參數：`max_attempts`、`min_retry_wait_sec`、`resume_buffer_sec`、`resume_prompt`、`resume_model`、`resume_mode`、`handoff_prompt`、`kitty_bin`、`inject_ttl_sec`、`notify` |
+| `~/.claude/autocontinue/config.json` | 可調參數：`arm_builtin`（就地等待總開關）、`max_attempts`、`min_retry_wait_sec`、`resume_buffer_sec`、`resume_prompt`、`resume_model`、`resume_mode`、`handoff_prompt`、`kitty_bin`、`inject_ttl_sec`、`notify` |
 | `~/.claude/autocontinue/logs/sessions/` | 每條鏈的 claude 輸出 |
-| `~/.claude/autocontinue/logs/hook.log`、`checker.log` | 事件紀錄 |
+| `~/.claude/autocontinue/logs/hook.log`、`checker.log`、`arm.log` | 事件紀錄 |
 | `~/.claude/autocontinue/logs/stopfailure-raw.jsonl` | StopFailure 原始 payload（校準解析用） |
 | `~/.claude/autocontinue/logs/done/`、`dead/` | 完成／放棄的紀錄 |
 

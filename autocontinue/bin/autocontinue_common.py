@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -53,12 +54,30 @@ DEFAULT_CONFIG = {
         "需要更早的脈絡（某個決策的理由、先前讀過的檔案內容）時，再針對性地 grep 那個檔案，"
         "不要整份讀進來。接著從中斷處繼續完成原本的任務；若其實已完成，確認狀態後即可結束。"
     ),
-    # resume_mode "inject" only: path to the kitty binary used for remote control.
+    # Path to the kitty binary used for remote control, by both arm_builtin
+    # below and resume_mode "inject".
     "kitty_bin": "kitty",
     # resume_mode "inject" only: an injected resume runs in your TUI where we
     # can't watch its exit, so an injected entry that never re-hits the limit is
     # assumed finished after this many seconds (default 6h) and retired to done/.
     "inject_ttl_sec": 21600,
+    # The moment a session is rate-limited, drive /rate-limit-options in its own
+    # kitty window and pick "Wait here, then continue automatically ...", handing
+    # the wait to Claude Code itself. This is the cheapest outcome by a wide
+    # margin -- the session keeps its context, permission mode and warm prompt
+    # cache, and nothing has to run at reset time -- so it is tried first and the
+    # queue below only covers the cases where it can't be done (no kitty remote
+    # control, window closed, dialog not where we expected it).
+    "arm_builtin": True,
+    # Seconds to let the TUI finish drawing the limit message before typing.
+    "arm_settle_sec": 1.5,
+    # How long to wait for the dialog to appear, and for its confirmation.
+    "arm_dialog_timeout_sec": 6.0,
+    # Pause between arrow keys while walking the highlight onto the entry.
+    "arm_step_sec": 0.15,
+    # Give up after this many arrow keys (the menu is far shorter than this;
+    # the cap exists so a misread screen can't turn into an endless key stream).
+    "arm_max_steps": 16,
     "notify": True,
 }
 
@@ -96,6 +115,58 @@ def notify(cfg, title, message):
         subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
     except Exception:
         pass
+
+
+def resolve_kitty(cfg):
+    """Absolute path to the kitty binary, or None when it isn't installed.
+
+    launchd agents and hooks don't inherit a login shell's PATH, so the usual
+    install locations are searched explicitly.
+    """
+    binary = cfg.get("kitty_bin", "kitty")
+    if os.path.sep in binary:
+        return binary if os.path.exists(binary) else None
+    search = ":".join(
+        [
+            os.environ.get("PATH", ""),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/Applications/kitty.app/Contents/MacOS",
+            os.path.expanduser("~/.local/bin"),
+        ]
+    )
+    found = shutil.which(binary, path=search)
+    if found:
+        return found
+    fallback = "/Applications/kitty.app/Contents/MacOS/kitty"
+    return fallback if os.path.exists(fallback) else None
+
+
+def kitty_window_alive(kitty_bin, listen, win):
+    """True iff window id `win` still exists in the kitty instance at `listen`.
+
+    Remote-control writes report success even when no window matched, so the
+    target has to be confirmed open before anything is sent to it.
+    """
+    try:
+        out = subprocess.run(
+            [kitty_bin, "@", "--to", listen, "ls"],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        return False
+    if out.returncode != 0:
+        return False
+    try:
+        data = json.loads(out.stdout.decode("utf-8", "replace"))
+    except (ValueError, AttributeError):
+        return False
+    for osw in data:
+        for tab in osw.get("tabs", []):
+            for w in tab.get("windows", []):
+                if str(w.get("id")) == str(win):
+                    return True
+    return False
 
 
 def parse_reset_time(message, now=None):
