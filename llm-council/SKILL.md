@@ -1,6 +1,6 @@
 ---
 name: llm-council
-description: Convenes a multi-model "council" to answer a question, then synthesizes a single best answer — inspired by Karpathy's llm-council. Each member runs through its own subscription/sign-in CLI, not an API key: Codex (ChatGPT sub), Gemini (Antigravity `agy`), and Claude (`claude -p`). This Claude Code session chairs the synthesis. Use when the user says "ask the council", "llm council", "convene the council", "second opinion", "what do other models think", "compare models on this", "ask codex and gemini too", "make the models debate", "have them cross-examine each other", or invokes "/llm-council".
+description: Convenes a multi-model "council" to answer a question, then synthesizes a single best answer — inspired by Karpathy's llm-council. Each member runs through its own subscription/sign-in CLI, not an API key: ChatGPT (the desktop app, via `chatgpt-ask`), Gemini (Antigravity `agy`), and Claude (`claude -p`), with Codex (`codex exec`) standing in where the desktop app cannot reach. This Claude Code session chairs the synthesis. Use when the user says "ask the council", "llm council", "convene the council", "second opinion", "what do other models think", "compare models on this", "ask codex and gemini too", "make the models debate", "have them cross-examine each other", or invokes "/llm-council".
 argument-hint: "\"<question>\" | debate \"<question>\" | quick \"<question>\" | raw \"<question>\""
 ---
 
@@ -14,22 +14,38 @@ OpenRouter.
 
 ## Members
 
-| Member | Reached via | Auth (subscription / sign-in, not API key) |
-|---|---|---|
-| **Codex** | `codex exec` | ChatGPT subscription (`auth_mode: chatgpt` in `~/.codex/auth.json`) |
-| **Gemini** | Antigravity `agy -p` | Google Antigravity sign-in (Gemini models) |
-| **Claude** | `claude -p` | Claude subscription — runs as an **independent member**, isolated from the chair |
-| **opencode** | `opencode run` | opencode's own free tier — costs no subscription quota |
-| **ChatGPT** *(opt-in)* | `chatgpt-ask`, over the desktop app's debugging port | the app's own sign-in |
+| Member | Reached via | Auth (subscription / sign-in, not API key) | On the default roster |
+|---|---|---|---|
+| **ChatGPT** | `chatgpt-ask`, over the desktop app's debugging port | the app's own sign-in | yes |
+| **Gemini** | Antigravity `agy -p` | Google Antigravity sign-in (Gemini models) | yes |
+| **Claude** | `claude -p` | Claude subscription — runs as an **independent member**, isolated from the chair | yes |
+| **Codex** | `codex exec` | ChatGPT subscription (`auth_mode: chatgpt` in `~/.codex/auth.json`) | only as ChatGPT's stand-in |
+| **opencode** | `opencode run` | opencode's own free tier — costs no subscription quota | no — name it in `--members` |
 
-The free model slugs opencode offers rotate, and a withdrawn one fails every call rather
-than falling back. `opencode models | grep free` lists the live ones; the default is set in
-`DEFAULT_OPENCODE_MODEL`. This member is refused on `--workdir`: unlike the others it has no
-read-only mode to hold it to.
+**GPT sits on the council through the desktop app, not Codex.** For a council answer — prose
+from a self-contained prompt, no repo, no tool calls — `chatgpt` and `codex` are the same
+voice off a different meter, and the app's meter is the ChatGPT **conversation** allowance
+instead of Codex quota. So `chatgpt` holds the seat and `codex` is kept for the two kinds of
+run the app cannot serve. `council.py` makes that swap itself and announces it on stderr:
 
-`chatgpt` answers out of the ChatGPT **conversation** allowance rather than the Codex quota
-that `codex` spends, which is the reason to reach for it. It is opt-in because it needs setup
-and carries limits the other members don't — see [The ChatGPT member](#the-chatgpt-member).
+- **`--workdir`** — the app answers from inside a GUI and has no filesystem, so a borrowed
+  repo is invisible to it.
+- **an explicit `--output-schema`** — a GUI has no such flag, so the schema is appended to the
+  prompt as a request. The default answer schema is fine that way (it is rendered back to
+  prose regardless, and a member that ignores it still contributes), but a caller who names
+  its own schema is reading `structured` downstream and needs the contract kept.
+
+The swap rewrites the **default** roster only. A roster given in `--members` is used exactly
+as written — `chatgpt` then refuses `--workdir` itself rather than being quietly answered by
+a member nobody asked for.
+
+**opencode is off the default roster.** Its free models sit a rung below the rest, and a weak
+answer costs a council more than a missing one: it still gets ranked, still gets synthesized,
+still takes a reviewer's attention in Stage 2. Add it back with `--members` when a fourth
+voice is worth more than its quality. Its free slugs also rotate, and a withdrawn one fails
+every call rather than falling back — `opencode models | grep free` lists the live ones, and
+the default is `DEFAULT_OPENCODE_MODEL`. It is refused on `--workdir` too: unlike the others
+it has no read-only mode to hold it to.
 
 Members run **in parallel** through `council.py`, each in a throwaway temp dir —
 this skill never passes `--workdir`, so no member can see the user's repo (see Rules).
@@ -37,8 +53,8 @@ this skill never passes `--workdir`, so no member can see the user's repo (see R
 a member answer, because the `claude` member already carries Claude's independent voice (run
 with `--setting-sources project` so the session's hooks/memory don't leak into it). The CLIs
 are stateless one-shot calls, so every prompt must be self-contained. `council.py` defaults to
-`codex,gemini,claude`; pass `--members` to change that (`--members chatgpt,gemini,claude`
-swaps Codex out for the desktop app when Codex quota is what's being conserved).
+**`chatgpt,gemini,claude`** (`DEFAULT_MEMBERS`); pass `--members` to change that. Stage 2 names
+its reviewers explicitly rather than taking this default — see Stage 2.
 
 ## The ChatGPT member
 
@@ -56,7 +72,7 @@ start on top of the answer itself.
 control can't be found the member *refuses* rather than filing the thread for real;
 `--allow-history` overrides that if the user asks for it.
 
-It honours `--schema` the same way the others do, but by *asking* rather than enforcing:
+It honours `--output-schema` the same way `opencode` does, but by *asking* rather than enforcing:
 there is no `--output-schema` in a GUI, so the schema is appended to the prompt and
 `parse_structured` falls back to prose if the reply is not JSON.
 
@@ -79,22 +95,33 @@ Three limits the CLI members don't have:
 | `/llm-council quick "<q>"` | 1 → 3 (skip cross-review) | Want multiple views fast and cheap |
 | `/llm-council raw "<q>"` | 1 only | Just show each model's answer side by side, no synthesis |
 
-> Each stage is one parallel `council.py` call (~10–60s depending on the slowest model).
-> A full run typically takes one to two minutes; `debate` adds at most one more round
-> (~30–60s) and **only when the cross-review actually surfaced disagreement** — tell the
-> user up front.
+> Stage 1 is one parallel `council.py` call (~10–60s depending on the slowest model);
+> Stage 2 is one call **per reviewer**, run in parallel, so it costs about the same wall
+> clock as one. A full run typically takes one to two minutes; `debate` adds at most one
+> more round (~30–60s) and **only when the cross-review actually surfaced disagreement** —
+> tell the user up front.
 
 ## Workflow
 
 ### Stage 1 — First opinions (fan-out)
 
-Write the question to a temp file, then dispatch **all** members in parallel, saving the
+**First, write the scoring criteria — before you read a single answer.** Derive three short,
+independent, question-specific criteria from the question alone and write one per line to
+`<tmp>/criteria.txt`. Once you have read the answers you cannot write an uncontaminated
+rubric: you would be choosing the yardstick to fit answers you have already formed an
+opinion about. A fixed triple is the wrong rubric for most questions anyway — "depth" means
+nothing for a factual lookup. If you cannot derive good ones, omit the file and
+`council.py` falls back to `correctness, depth, usefulness`; never block Stage 2 on this.
+
+Then write the question to a temp file and dispatch **all** members in parallel, saving the
 JSON to a file (Stage 2's anonymizer reads it from disk):
 ```sh
 python3 ~/.claude/skills/llm-council/council.py --prompt-file <tmp>/q.txt > <tmp>/stage1.json
 ```
 Check `members.<name>.ok` in the JSON. If a member has `ok: false`, note who dropped out
-(e.g. CLI not installed / not signed in) and continue with whoever answered. You do **not**
+(e.g. CLI not installed / not signed in) and continue with whoever answered. **If *every*
+member failed, stop**: report the dropouts and say there is no council answer. Do not
+synthesize one from nothing — a council of zero is not a small council. You do **not**
 add your own answer here — the `claude` member already represents Claude independently.
 
 You now hold one answer per member.
@@ -103,20 +130,78 @@ You now hold one answer per member.
 
 1. **Anonymize with the script — never shuffle or relabel by hand:**
    ```sh
-   python3 ~/.claude/skills/llm-council/council.py --anonymize <tmp>/stage1.json --question-file <tmp>/q.txt
+   python3 ~/.claude/skills/llm-council/council.py --anonymize <tmp>/stage1.json \
+       --question-file <tmp>/q.txt --members codex,claude --criteria <tmp>/criteria.txt
    ```
-   It shuffles the usable answers, labels them `Response A / B / C / …`, and writes two
-   files next to `stage1.json`: `review_prompt.txt` (the complete, self-contained review
-   prompt) and `label_map.json` (the private label→member mapping). With fewer than 2
-   usable answers it refuses and tells you to skip straight to Stage 3.
-   **Do not open `label_map.json` until Stage 3**, and never include it (or any member
-   name) in anything sent to a member.
-2. Dispatch the generated review prompt as-is:
-   ```sh
-   python3 ~/.claude/skills/llm-council/council.py --prompt-file <tmp>/review_prompt.txt > <tmp>/stage2.json
-   ```
+   It labels the usable answers `Response A / B / C / …` and writes, next to `stage1.json`,
+   **one prompt per reviewer** (`review_prompt.codex.txt`, `review_prompt.claude.txt`, …)
+   plus `label_map.json`, which is now nested: `{reviewer: {label: member}}`. The stdout
+   JSON reports the prompt path for each reviewer under `review_prompts`. With fewer than 2
+   usable answers it refuses and tells you what to do instead.
 
-You now hold one ranking per member, all over the same anonymized set.
+   **Each reviewer gets a different ordering, and that is the point.** Anonymising strips
+   brand bias, but one shared order leaves position bias *correlated*: if every reviewer
+   sees the same Response A, whatever primacy/recency preference the models have in common
+   adds up across the council instead of cancelling. The orders are cyclic rotations of one
+   shuffle, not independent shuffles — two independent shuffles of two answers coincide
+   half the time, which is exactly the small-council case this has to survive.
+
+   `--members` names the **reviewers**, who need not be the members that answered: a
+   reviewer absent from Stage 1 still gets a prompt, and an answer from a member that is
+   not a reviewer is still reviewed. Pass it explicitly; the roster is a decision, not a
+   default.
+   **Never include `label_map.json` — or any member name — in anything sent to a member.**
+   That, not chair ignorance, is the guarantee: you hold `stage1.json` and can always
+   identify an author from its text, and `debate` mode *requires* you to, since Stage 2.5
+   routes each rebuttal back to its own author. Keep the mapping out of every outgoing
+   prompt; open the file itself only when you need it (Stage 2.5 routing, or Stage 3).
+2. Dispatch **one call per reviewer**, each with its own prompt and its own output file,
+   run in parallel:
+   ```sh
+   python3 ~/.claude/skills/llm-council/council.py --members codex \
+       --output-schema ~/.claude/skills/llm-council/schema/review.schema.json \
+       --prompt-file <tmp>/review_prompt.codex.txt > <tmp>/stage2.codex.json
+   python3 ~/.claude/skills/llm-council/council.py --members claude \
+       --output-schema ~/.claude/skills/llm-council/schema/review.schema.json \
+       --prompt-file <tmp>/review_prompt.claude.txt > <tmp>/stage2.claude.json
+   ```
+   **The output file names matter**: `--aggregate` looks for `stage2.<reviewer>.json` beside
+   `label_map.json`.
+   **A shared redirect would interleave the JSON and lose rankings** — one output file per
+   reviewer, always. Check `members.<reviewer>.ok` in each; a reviewer that errored is a
+   Stage-2 dropout and must be named in the council notes, exactly like a Stage-1 one. If
+   **no** reviewer returned a usable ranking, skip to Stage 3 and synthesize from the
+   Stage-1 answers alone, saying that cross-review did not run.
+
+   The roster is a deliberate pair — `codex` (gpt-5.6-sol) and `claude` (claude-opus-5) —
+   chosen because ranking answers well is harder than producing them and the remaining
+   members are not strong enough at it.
+
+3. **Aggregate — do not do this arithmetic by hand:**
+   ```sh
+   python3 ~/.claude/skills/llm-council/council.py --aggregate <tmp>/label_map.json \
+       --criteria <tmp>/criteria.txt
+   ```
+   Pass the **same** `--criteria` file as step 1; the names are validated back. It emits
+   `ranking`, per-response `mean` / `spread` / `per_criterion`, `factual_errors`, a
+   `reviewers` map saying who counted and who did not, and the `gate` that Stage 2.5 reads.
+
+   Reviewers scored *labels*, and a label means a different answer to each of them, so the
+   numbers are not comparable until this step maps them back. It also **drops each
+   reviewer's score for its own answer** — a reviewer grading itself favours itself, and
+   with a two-reviewer roster that bias no longer averages out. The resulting unequal
+   comparison counts are handled by the `w/c` normalisation, which is what that
+   normalisation is for.
+
+   Consequences worth knowing when you read the output: a reviewer's own answer is scored
+   by everyone *except* itself, so on a two-reviewer council it carries one score and its
+   `spread` is `null`. Only answers from non-reviewer members get a disagreement signal.
+   A reviewer that failed, ignored the schema, or produced unusable scores appears in
+   `reviewers` with a reason and is excluded from the arithmetic while its prose stays
+   available in its `stage2.<reviewer>.json`. If **no** reviewer was usable the command
+   exits non-zero: synthesize from the Stage-1 answers and say cross-review did not run.
+
+You now hold one aggregate over the answers themselves, not per-reviewer label soup.
 
 ### Stage 2.5 — Conditional cross-examination (`debate` only)
 
@@ -125,16 +210,21 @@ change anything** — not a free-for-all that grinds the answers into mush. Open
 questions are exactly where extra debate rounds make models converge toward whoever
 sounds most confident rather than whoever is right, so this stays surgical.
 
-1. **Gate — answer these two questions first, in writing, quoting the evidence:**
-   - **Q1**: Do the reviewers' *top picks* differ? (Reordering the middle of the ranking
-     does not count — only a conflict about which answer is best.)
-   - **Q2**: Did any reviewer allege a **specific factual/correctness error** in a specific
-     answer? Quote the allegation. ("I'd phrase it differently" or style preferences do
-     not count.)
+1. **Gate — read `gate` from the aggregate; do not re-derive it in prose.**
+   `gate.rebuttal_recommended` is true when either arm trips:
+   - **the numeric arm** — the top two answers are closer together than the reviewers
+     disagree about them (`top_two_gap` below the larger `spread` of the two). A near-tie
+     the reviewers agree on is settled; a near-tie they disagree about is not.
+     `gate.contested_criterion` names the criterion they disagree about most, when there is
+     enough data to say.
+   - **the qualitative arm** — a reviewer quoted a specific factual error, listed under
+     `factual_errors`. This arm stands alone and is never overridden by the numbers: an
+     allegation of a false claim deserves an answer whatever the scores say.
 
-   If **both** answers are "no" — the council substantively **agrees** — **skip this
-   stage**, say so in one line ("council was in consensus; no rebuttal round needed"),
-   and go straight to Stage 3. Do not manufacture a debate.
+   If `rebuttal_recommended` is false, **skip this stage**, say so in one line ("council was
+   in consensus; no rebuttal round needed"), and go to Stage 3. Do not manufacture a debate.
+   When the numeric arm cannot run — fewer than two reviewers scored the leaders — the gate
+   says so in `reasons`; fall back to the qualitative arm alone rather than guessing.
 
 2. **One rebuttal round (contested answers only).** For each answer that drew a real
    objection, send it *back to its own author* with the strongest objection(s) raised
@@ -142,8 +232,11 @@ sounds most confident rather than whoever is right, so this stays surgical.
    objected). Dispatch one `council.py` call per contested author so each prompt stays
    self-contained:
    ```sh
-   python3 ~/.claude/skills/llm-council/council.py --members <author> --prompt-file <rebuttal.txt>
+   python3 ~/.claude/skills/llm-council/council.py --members <author> \
+       --prompt-file <tmp>/rebuttal_<author>.txt > <tmp>/rebuttal_<author>.json
    ```
+   **Give every call its own output file.** These run in parallel, so a shared redirect
+   interleaves their JSON and loses answers.
    Rebuttal prompt shape:
    ```
    Question: <original question>
@@ -165,7 +258,14 @@ You now hold, for each contested answer, a defend-or-concede response.
 
 ### Stage 3 — Chairman synthesis (you)
 
-Now (and only now) read `label_map.json` to de-anonymize, then as **Chairman** write the final answer. You are *not* a contestant
+The aggregate from Stage 2 step 3 has already de-anonymized everything: `ranking` and
+`responses` are keyed by member. Read it rather than mapping labels yourself — `Response A`
+means a different answer to each reviewer, and doing that bookkeeping by eye is how a
+ranking silently comes out wrong. The per-reviewer prose in each `stage2.<reviewer>.json`
+is still worth reading for the *reasons*; the numbers come from the aggregate.
+In `quick` mode, and whenever cross-review did not run, there is no aggregate at all —
+synthesize from Stage 1 and report no ranking rather than inventing one. Then, as
+**Chairman**, write the final answer. You are *not* a contestant
 — weigh the rankings and the substance honestly and adopt any member's point when it's stronger;
 don't favour the `claude` member by default. In `debate` mode also weigh the Stage-2.5 round:
 a **conceded** point is settled (drop it from the answer), and a point that was **defended with
@@ -174,8 +274,10 @@ genuinely open. Present:
 
 1. **The answer** — one synthesized, authoritative response (this is the headline).
 2. **Council notes** (compact, secondary): each member's one-line stance, the aggregate
-   ranking, and any real disagreement worth flagging. In `debate` mode add a one-line
-   verdict per contested point (defended / conceded / still open). Keep it short.
+   ranking, and any real disagreement worth flagging. Give the ranking with its numbers
+   (`mean` per response) rather than as a bare order, and name any reviewer that was
+   excluded from the arithmetic and why. In `debate` mode add a one-line verdict per
+   contested point (defended / conceded / still open). Keep it short.
 
 For `raw` mode, stop after Stage 1 and show the answers side by side. For `quick`, skip
 Stage 2 and synthesize directly from the Stage-1 answers. For `debate`, run the conditional
@@ -186,14 +288,16 @@ Stage 2.5 before synthesizing.
 Each member is optional — if its CLI is absent or signed out, `council.py` returns that member
 as `ok: false` and the council proceeds with the rest.
 
-- **`codex`** — signed into a ChatGPT subscription. Verify `~/.codex/auth.json` has
-  `"auth_mode": "chatgpt"`; else `codex login`.
+- **`chatgpt-ask`** (plus ChatGPT.app and `uv`) — on the default roster, so a plain run needs
+  it. The app is launched and quit for you, so it does not need to be running beforehand. If
+  the command is missing, that member returns `ok: false` telling you to link it; see
+  `chatgpt-bridge/`. macOS only.
 - **`agy`** (Antigravity CLI) — signed in for Gemini models.
 - **`claude`** (Claude Code) — the same subscription as this session.
+- **`codex`** — signed into a ChatGPT subscription. Verify `~/.codex/auth.json` has
+  `"auth_mode": "chatgpt"`; else `codex login`. Not on the default roster, but a Stage-2
+  reviewer and ChatGPT's stand-in on `--workdir`, so a full run still reaches it.
 - **`python3`** (stdlib only — the `chatgpt` member's own dependency is handled by `uv`).
-- **`chatgpt-ask`** (plus ChatGPT.app and `uv`) — only for the `chatgpt` member. The app is
-  launched and quit for you, so it does not need to be running beforehand. If the command is
-  missing, that member returns `ok: false` telling you to link it; see `chatgpt-bridge/`.
 
 `council.py` degrades gracefully: a missing CLI, timeout, or crash becomes a per-member
 `ok: false` with an `error` string rather than failing the whole run.
@@ -224,18 +328,32 @@ as `ok: false` and the council proceeds with the rest.
 ### Structured output is ON by default
 
 Every member is bound to `schema/answer.schema.json` (`answer`, `key_points`, `confidence`,
-`caveats`). All three CLIs support it, so members stay comparable:
+`caveats`), so members stay comparable. **Three CLIs enforce it; two only get asked:**
 
 | member | flag | shape |
 |---|---|---|
 | codex | `--output-schema <FILE>` | the `-o` file holds raw JSON |
 | agy | `--json-schema <FILE>` **plus `--output-format json`** — it refuses the schema otherwise | envelope, parsed object under `structured_output` |
 | claude | `--json-schema '<inline JSON>'` — **a path is rejected** | stdout is raw JSON |
+| opencode | *none — no `--output-schema` equivalent exists* | the schema is appended to the prompt; conformance is voluntary |
+| chatgpt | *none — a GUI has no such flag* | same: appended to the prompt, prose accepted back |
+
+`chatgpt` is on the default roster, so a default run already contains one member whose
+structure is asked for rather than enforced (an explicit `--output-schema` is exactly what
+swaps that member for `codex`). `parse_structured()` does `json.loads` and no validation, which is
+harmless while the fields are prose — but anything that does *arithmetic* on member output
+must validate locally first.
 
 **The JSON is rendered straight back to Markdown into `answer`, with the raw object kept under
 `structured`.** That is what makes the default safe: Stage-3 synthesis, `--anonymize`, and the
 human all keep reading prose. A member that ignores the schema passes through unchanged rather
 than being dropped.
+
+`schema/review.schema.json` is the second schema in the box: Stage 2 binds it so each
+reviewer returns a per-response, per-criterion score vector plus any quoted factual errors,
+which is what `--aggregate` consumes. Scoring each criterion independently beats one
+compound judgement — asked "is this correct?" as a single question, a verifier latches onto
+whichever factor is most salient in the prompt.
 
 `--output-schema FILE` swaps the schema (e.g. a findings shape for `review-me`);
 `--no-output-schema` turns it off entirely.
@@ -252,10 +370,12 @@ until the member returns an error string instead of an answer:
 
 ## Rules
 
-- **Anonymity is the point.** The `--anonymize` mode owns the shuffle and the labels —
-  never rebuild the review prompt by hand, never open `label_map.json` before Stage 3, and
-  never leak the A/B/C → member mapping (or any member name) into a member's prompt;
-  it exists to strip brand bias from the rankings.
+- **Anonymity is the point.** The `--anonymize` mode owns the orderings and the labels —
+  never rebuild a review prompt by hand and never leak the A/B/C → member mapping (or any
+  member name) into a member's prompt. That leak is the thing the rule forbids; the chair
+  reading the map is not, and `debate` mode requires it before Stage 3. Stripping brand bias
+  is why the labels exist; giving each reviewer a different ordering is why the position
+  bias does not survive either.
 - **Members only via `council.py`** — it runs each in a throwaway temp dir (codex additionally
   in a read-only sandbox; `claude` with `--setting-sources project`) so they can't touch the
   user's repo or inherit this session's hooks/memory while answering.

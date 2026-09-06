@@ -11,18 +11,21 @@ Each member authenticates through its own *subscription / sign-in*, not an API k
   - claude    -> Claude Code headless (`claude -p`) — Claude as an independent member,
                  separate from the orchestrating session that chairs the council
   - opencode  -> opencode CLI on free DeepSeek, so it costs no subscription quota
-  - chatgpt   -> the ChatGPT desktop app via `chatgpt-ask` (opt-in) — spends the
-                 conversation allowance rather than Codex quota
+                 (off the default roster — see DEFAULT_MEMBERS)
+  - chatgpt   -> the ChatGPT desktop app via `chatgpt-ask` — spends the conversation
+                 allowance rather than Codex quota, which is why it, and not codex,
+                 holds the GPT seat by default
 
 Usage:
-    python3 council.py --prompt-file q.txt                 # all members
+    python3 council.py --prompt-file q.txt                 # the default roster
     python3 council.py --members codex,claude --prompt "..."   # a subset
     echo "question" | python3 council.py                   # prompt via stdin
     python3 council.py --prompt-file review.txt --workdir /path/to/repo
         # members run *in* that repo so they can read real files (review work);
         # they are hardened read-only and the directory is never deleted
     python3 council.py --anonymize stage1.json --question-file q.txt
-        # no dispatch: shuffle + relabel the stage-1 answers deterministically,
+        # no dispatch: shuffle + relabel the stage-1 answers (unseeded, so the
+        # labelling differs run to run),
         # write review_prompt.txt (self-contained cross-review prompt) and
         # label_map.json (private label→member mapping) next to stage1.json
 
@@ -51,6 +54,7 @@ import os
 import random
 import re
 import shutil
+import math
 import string
 import subprocess
 import sys
@@ -60,13 +64,29 @@ from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_TIMEOUT = 300  # seconds, per member — matches agy's default --print-timeout
 DEFAULT_GEMINI_MODEL = "Gemini 3.1 Pro (High)"
-DEFAULT_CODEX_MODEL = ""  # empty = whatever the ChatGPT subscription defaults to
-DEFAULT_CLAUDE_MODEL = ""  # empty = whatever the Claude subscription defaults to
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"  # pinned: the reviewer roster names it explicitly.
+# Verified to be accepted under ChatGPT auth — the HTTP 400 documented in SKILL.md is
+# specific to the `gpt-5-codex` slug, not to pinning a model. `model_reasoning_effort`
+# is still inherited from ~/.codex/config.toml and is NOT pinned here.
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"  # pinned: the reviewer roster names it explicitly
 # A free slug on opencode's own provider. These come and go: the previous default
 # (opencode/deepseek-v4-flash-free) was withdrawn and every call returned a server
 # error. `opencode models | grep free` lists what is currently live.
 DEFAULT_OPENCODE_MODEL = "opencode/mimo-v2.5-free"
-ALL_MEMBERS = "codex,gemini,claude,opencode"
+
+# Who answers when --members is not given.
+#
+# `chatgpt` holds the GPT seat rather than `codex`: for a council answer — prose from a
+# self-contained prompt, no repo, no tool calls — the two are the same voice off a
+# different meter, and the desktop app's meter is the conversation allowance instead of
+# Codex quota. resolve_members() hands the seat back to codex for the runs the app
+# cannot serve.
+#
+# `opencode` is off the roster. Its free slugs sit a rung below the rest, and a weak
+# answer costs a council more than a missing one: it is still ranked, still synthesized,
+# and still takes a reviewer's attention in Stage 2. Name it in --members when a fourth
+# voice is worth more than its quality.
+DEFAULT_MEMBERS = "chatgpt,gemini,claude"
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")  # strip terminal color codes from CLI stdout
 
@@ -83,12 +103,39 @@ def load_schema(path):
     return path, json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
 
 
+def render_reviews(reviews):
+    """Render the cross-review shape (schema/review.schema.json) as readable Markdown."""
+    out = []
+    for r in reviews:
+        if not isinstance(r, dict):
+            continue
+        lines = []
+        for s in r.get("scores") or []:
+            if not isinstance(s, dict):
+                continue
+            reason = str(s.get("reason") or "").strip()
+            lines.append(f"- {s.get('criterion', '?')}: {s.get('score', '?')}"
+                         + (f" — {reason}" if reason else ""))
+        errs = [str(e).strip() for e in (r.get("factual_errors") or []) if str(e).strip()]
+        if errs:
+            lines.append("- **factual errors alleged:**")
+            lines += [f"  - {e}" for e in errs]
+        out.append(f"**Response {r.get('label', '?')}**"
+                   + ("\n" + "\n".join(lines) if lines else ""))
+    return "\n\n".join(out)
+
+
 def render_structured(obj):
     """Turn a schema-shaped answer back into Markdown.
 
     Structured output is only useful if it does not cost us the prose: Stage-3 synthesis and
     `--anonymize` read `answer` as text, and so does the human. So every member's JSON is
     rendered here and the raw object is kept alongside it under `structured`.
+
+    Returning "" for a dict is not an option. `parse_structured()` drops `structured`
+    entirely when the render comes back empty, so an unrecognised shape would lose the very
+    object the schema was set to preserve — silently, with raw JSON handed to a reader
+    expecting prose. Anything that parsed as an object therefore renders as *something*.
     """
     if not isinstance(obj, dict):
         return ""
@@ -99,10 +146,16 @@ def render_structured(obj):
         items = obj.get(key)
         if isinstance(items, list) and items:
             parts.append(f"**{heading}**\n" + "\n".join(f"- {i}" for i in items))
+    reviews = obj.get("reviews")
+    if isinstance(reviews, list) and reviews:
+        parts.append(render_reviews(reviews))
     conf = obj.get("confidence")
     if conf:
         parts.append(f"_confidence: {conf}_")
-    return "\n\n".join(x for x in parts if x).strip()
+    rendered = "\n\n".join(x for x in parts if x).strip()
+    if rendered:
+        return rendered
+    return "```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```"
 
 
 FENCED = re.compile(r"\A```[A-Za-z]*\s*\n(.*?)\n?```\s*\Z", re.S)
@@ -483,27 +536,85 @@ CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude",
            "opencode": "opencode", "chatgpt": "chatgpt-ask"}
 
 
+def resolve_members(members, borrowed, strict_schema):
+    """Hand the GPT seat back to `codex` for the runs the ChatGPT app cannot serve.
+
+    The app buys its cheaper meter with two gaps the CLI does not have: it has no
+    filesystem, so a borrowed --workdir is invisible to it, and there is no
+    `--output-schema` in a GUI, so a schema is a request it is free to decline. Either
+    one turns it from a cheaper member into a member answering a different question.
+
+    The default answer schema does not count as strict. It is rendered back to prose
+    either way and `parse_structured` accepts a member that ignored it, so asking is
+    enough. A caller who names its own schema is reading `structured` downstream and
+    needs the contract kept — that one counts.
+
+    Only the DEFAULT roster is rewritten. An explicit --members is the caller's decision
+    and is left exactly as given; `chatgpt` then refuses --workdir on its own rather than
+    being quietly answered by a member nobody asked for.
+
+    Returns (members, reason) — reason is "" when nothing was swapped.
+    """
+    if "chatgpt" not in members or "codex" in members:
+        return members, ""
+    if borrowed:
+        need = "--workdir, and the desktop app has no filesystem"
+    elif strict_schema:
+        need = "an enforced --output-schema, which a GUI cannot promise"
+    else:
+        return members, ""
+    return ([("codex" if m == "chatgpt" else m) for m in members],
+            f"chatgpt -> codex: this run needs {need}")
+
+
 def dispatch(name, prompt, model, timeout, workdir, borrowed, schema=None):
     """Wrap a runner so a missing CLI / timeout / crash becomes a structured error, never an exception."""
     try:
         return RUNNERS[name](prompt, model, timeout, workdir, borrowed, schema=schema)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "answer": "", "model": model or "default", "elapsed_s": timeout,
-                "error": f"timed out after {timeout}s"}
+        return {"ok": False, "answer": "", "structured": None, "model": model or "default",
+                "elapsed_s": timeout, "error": f"timed out after {timeout}s"}
     except FileNotFoundError:
-        return {"ok": False, "answer": "", "model": model or "default", "elapsed_s": 0,
+        return {"ok": False, "answer": "", "structured": None, "model": model or "default",
+                "elapsed_s": 0,
                 "error": f"`{CLI_BIN[name]}` not found on PATH — is the CLI installed and signed in?"}
     except Exception as exc:  # noqa: BLE001 — surface anything else as a member error
-        return {"ok": False, "answer": "", "model": model or "default", "elapsed_s": 0,
-                "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": False, "answer": "", "structured": None, "model": model or "default",
+                "elapsed_s": 0, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def anonymize(stage1_path, question_file):
-    """Turn a saved stage-1 JSON into a shuffled, relabelled cross-review prompt.
+DEFAULT_CRITERIA = ["correctness", "depth", "usefulness"]
 
-    Doing the shuffle + labelling here (not in the orchestrating LLM) means the
-    label→member mapping never has to enter the chair's context before synthesis,
-    so it cannot leak into a reviewer prompt.
+
+def load_criteria(path):
+    """One criterion per line. Blank lines and `#` comments ignored."""
+    if not path:
+        return list(DEFAULT_CRITERIA)
+    with open(path, encoding="utf-8") as fh:
+        crit = [ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
+    if not crit:
+        sys.exit(f"council.py: --criteria file is empty: {path}")
+    if len(crit) != len(set(crit)):
+        sys.exit("council.py: --criteria contains duplicates")
+    return crit
+
+
+def anonymize(stage1_path, question_file, reviewers, criteria):
+    """Turn a saved stage-1 JSON into one relabelled cross-review prompt PER REVIEWER.
+
+    Doing the shuffle + labelling here (not in the orchestrating LLM) keeps the
+    label→member mapping out of every prompt sent to a member — that, and not chair
+    ignorance, is the guarantee. The chair holds stage1.json and can always identify an
+    author by its text; `debate` mode in fact requires that, since Stage 2.5 routes a
+    rebuttal back to the author before Stage 3 ever opens label_map.json.
+
+    Every reviewer gets a DIFFERENT order. One shared order would leave the reviewers'
+    position bias correlated: anonymising the answers removes brand bias, but if all
+    reviewers see the same Response A then whatever primacy/recency preference the models
+    share adds up across the council instead of cancelling. The orders are cyclic
+    rotations of one shuffle rather than independent shuffles, so each answer is spread
+    evenly over the slots — two independent shuffles of two answers coincide half the
+    time, which is exactly the small-council case this has to survive.
     """
     with open(stage1_path, encoding="utf-8") as fh:
         data = json.load(fh)
@@ -514,37 +625,244 @@ def anonymize(stage1_path, question_file):
     answered = [(m, (r.get("answer") or "").strip()) for m, r in members.items()
                 if r.get("ok") and (r.get("answer") or "").strip()]
     dropouts = sorted(set(members) - {m for m, _ in answered})
+    if not answered:
+        sys.exit("council.py: no usable answers in stage 1 — every member failed or "
+                 "answered blank. There is no council answer to give: report the "
+                 "dropouts and stop. Do NOT synthesize.")
     if len(answered) < 2:
-        sys.exit("council.py: fewer than 2 usable answers — nothing to cross-review; "
-                 "skip Stage 2 and synthesize directly from the answers you have")
+        sys.exit(f"council.py: only 1 usable answer ({answered[0][0]}) — nothing to "
+                 "cross-review; skip Stage 2 and synthesize from that single answer, "
+                 "saying in the council notes that the rest dropped out")
     if len(answered) > len(string.ascii_uppercase):
         sys.exit("council.py: too many answers to label A–Z")
 
     random.shuffle(answered)
-    labels = string.ascii_uppercase[: len(answered)]
-    mapping = {labels[i]: m for i, (m, _) in enumerate(answered)}
-
-    blocks = "\n\n".join(f"--- Response {labels[i]} ---\n{a}" for i, (_, a) in enumerate(answered))
-    prompt = (
-        f"Question: {question}\n\n"
-        "Below are anonymous responses to this question. Evaluate each for correctness,\n"
-        "depth, and usefulness, then rank them best-to-worst with a one-line justification\n"
-        "each. If a response contains a specific factual or correctness error, quote the\n"
-        "erroneous claim and say why it is wrong.\n\n"
-        f"{blocks}\n"
-    )
-
+    n = len(answered)
+    labels = string.ascii_uppercase[:n]
     outdir = os.path.dirname(os.path.abspath(stage1_path))
-    prompt_path = os.path.join(outdir, "review_prompt.txt")
+
+    prompts, mapping = {}, {}
+    for r, reviewer in enumerate(reviewers):
+        # Rotate rather than reshuffle: every answer walks through the slots.
+        order = [answered[(i + r) % n] for i in range(n)]
+        mapping[reviewer] = {labels[i]: m for i, (m, _) in enumerate(order)}
+
+        blocks = "\n\n".join(f"--- Response {labels[i]} ---\n{a}"
+                             for i, (_, a) in enumerate(order))
+        crit_lines = "\n".join(f"- {c}" for c in criteria)
+        prompt = (
+            f"Question: {question}\n\n"
+            "Below are anonymous responses to this question. Score EVERY response on EACH\n"
+            "criterion below, independently. Judge one criterion at a time: do not form a\n"
+            "single overall impression and spread it across the criteria — a compound\n"
+            "judgement collapses onto whichever factor is most salient, which is the thing\n"
+            "this decomposition exists to prevent.\n\n"
+            "Criteria:\n"
+            f"{crit_lines}\n\n"
+            "Score each criterion 1-100 (1 = worthless, 50 = borderline, 100 = could not be\n"
+            "better) and give a one-line reason. Use the range: two responses that differ\n"
+            "should not get the same number. Do not rank the responses — the scores are the\n"
+            "ranking. If a response contains a specific factual or correctness error, quote\n"
+            "the erroneous claim and say why it is wrong; style preferences are not errors.\n\n"
+            f"{blocks}\n"
+        )
+        prompt_path = os.path.join(outdir, f"review_prompt.{reviewer}.txt")
+        with open(prompt_path, "w", encoding="utf-8") as fh:
+            fh.write(prompt)
+        prompts[reviewer] = prompt_path
+
     map_path = os.path.join(outdir, "label_map.json")
-    with open(prompt_path, "w", encoding="utf-8") as fh:
-        fh.write(prompt)
     with open(map_path, "w", encoding="utf-8") as fh:
         json.dump(mapping, fh, ensure_ascii=False, indent=2)
 
-    json.dump({"review_prompt": prompt_path, "label_map": map_path,
-               "responses": len(answered), "dropouts": dropouts},
+    json.dump({"review_prompts": prompts, "label_map": map_path,
+               "responses": n, "reviewers": list(reviewers), "dropouts": dropouts},
               sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+
+
+def _reviewer_scores(obj, labels_for_reviewer, criteria):
+    """(scores, error). scores is {member: {criterion: int}}; error explains a rejection.
+
+    A reviewer whose numbers cannot be trusted is excluded from the ARITHMETIC only — the
+    caller still has its prose. Silently averaging a malformed review would be worse than
+    dropping it, and dropping it silently would be worse than saying so.
+    """
+    if not isinstance(obj, dict) or not isinstance(obj.get("reviews"), list):
+        return None, "no `reviews` array (member ignored the schema)"
+    out, seen = {}, set()
+    for r in obj["reviews"]:
+        if not isinstance(r, dict):
+            return None, "a review entry is not an object"
+        label = str(r.get("label", "")).strip()
+        if label not in labels_for_reviewer:
+            return None, f"unknown response label {label!r}"
+        if label in seen:
+            return None, f"response {label} scored twice"
+        seen.add(label)
+        per = {}
+        for s in r.get("scores") or []:
+            if not isinstance(s, dict):
+                return None, "a score entry is not an object"
+            name = str(s.get("criterion", "")).strip()
+            if name not in criteria:
+                return None, f"unknown criterion {name!r}"
+            try:
+                val = int(s.get("score"))
+            except (TypeError, ValueError):
+                return None, f"non-numeric score for {name!r}"
+            if not 1 <= val <= 100:
+                return None, f"score {val} for {name!r} is outside 1-100"
+            per[name] = val
+        missing = [c for c in criteria if c not in per]
+        if missing:
+            return None, f"response {label} is missing criteria: {', '.join(missing)}"
+        out[labels_for_reviewer[label]] = per
+    unscored = set(labels_for_reviewer.values()) - set(out)
+    if unscored:
+        return None, f"did not score: {', '.join(sorted(unscored))}"
+    return out, ""
+
+
+def aggregate(map_path, criteria):
+    """Align every reviewer's scores onto the answers themselves and rank them.
+
+    Each reviewer saw its own ordering, so a label means a different answer to each of
+    them; only this function's own label_map lookup makes the numbers comparable. Doing it
+    here rather than in the chair is not about hiding authorship — the chair holds
+    stage1.json and always knew it — it is because label bookkeeping across N permutations
+    is exactly the kind of thing a reader gets quietly wrong.
+    """
+    outdir = os.path.dirname(os.path.abspath(map_path))
+    with open(map_path, encoding="utf-8") as fh:
+        label_map = json.load(fh)
+    if not isinstance(label_map, dict) or not all(isinstance(v, dict) for v in label_map.values()):
+        sys.exit("council.py: --aggregate expects the nested label_map.json "
+                 "({reviewer: {label: member}}) written by --anonymize")
+
+    scores, reviewers = {}, {}
+    for reviewer, labels in label_map.items():
+        path = os.path.join(outdir, f"stage2.{reviewer}.json")
+        if not os.path.exists(path):
+            reviewers[reviewer] = {"ok": False, "reason": f"no {os.path.basename(path)}"}
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                res = (json.load(fh).get("members") or {}).get(reviewer) or {}
+        except (OSError, json.JSONDecodeError, AttributeError) as exc:
+            reviewers[reviewer] = {"ok": False, "reason": f"unreadable: {type(exc).__name__}"}
+            continue
+        if not res.get("ok"):
+            reviewers[reviewer] = {"ok": False,
+                                   "reason": f"member failed: {(res.get('error') or '')[:120]}"}
+            continue
+        parsed, err = _reviewer_scores(res.get("structured"), labels, criteria)
+        if err:
+            reviewers[reviewer] = {"ok": False, "reason": f"unusable scores — {err}",
+                                   "prose_retained": True}
+            continue
+        # A reviewer grading its own answer favours it, and with a small reviewer pair that
+        # bias no longer averages out over the council. Its own answer is dropped; the
+        # w/c normalisation below is what makes the resulting unequal counts comparable.
+        own = parsed.pop(reviewer, None)
+        reviewers[reviewer] = {"ok": True, "own_answer_excluded": own is not None}
+        scores[reviewer] = parsed
+
+    if not scores:
+        json.dump({"reviewers": reviewers, "usable_reviewers": 0,
+                   "error": "no reviewer produced usable scores — synthesize from the "
+                            "stage-1 answers and say cross-review did not run"},
+                  sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        sys.exit(1)
+
+    # Per reviewer, a response's strength is the mean of its criterion scores mapped to
+    # [0,1] — the paper averages criteria inside R, then compares differences of R.
+    r_of = {rv: {m: sum(per.values()) / len(per) / 100.0 for m, per in per_m.items()}
+            for rv, per_m in scores.items()}
+
+    members = sorted({m for per_m in scores.values() for m in per_m})
+    w = {m: 0.0 for m in members}
+    c = {m: 0 for m in members}
+    for rv, rs in r_of.items():
+        seen = sorted(rs)
+        for i in range(len(seen)):
+            for j in range(i + 1, len(seen)):
+                a, b = seen[i], seen[j]
+                pa = 1.0 / (1.0 + math.exp(-(rs[a] - rs[b])))
+                w[a] += pa
+                w[b] += 1.0 - pa
+                c[a] += 1
+                c[b] += 1
+
+    strength = {m: (w[m] / c[m] if c[m] else 0.0) for m in members}
+    ranking = sorted(members, key=lambda m: (-strength[m], m))
+
+    per_member = {}
+    for m in members:
+        by_rv = {rv: round(rs[m], 4) for rv, rs in r_of.items() if m in rs}
+        vals = list(by_rv.values())
+        per_member[m] = {
+            "strength": round(strength[m], 4),
+            "mean": round(sum(vals) / len(vals), 4) if vals else None,
+            "spread": round(max(vals) - min(vals), 4) if len(vals) > 1 else None,
+            "scored_by": by_rv,
+            "comparisons": c[m],
+            "per_criterion": {
+                crit: round(sum(scores[rv][m][crit] for rv in scores if m in scores[rv])
+                            / sum(1 for rv in scores if m in scores[rv]), 1)
+                for crit in criteria
+                if any(m in scores[rv] for rv in scores)
+            },
+        }
+
+    errors = {}
+    for rv in scores:
+        path = os.path.join(outdir, f"stage2.{rv}.json")
+        with open(path, encoding="utf-8") as fh:
+            obj = ((json.load(fh).get("members") or {}).get(rv) or {}).get("structured") or {}
+        for r in obj.get("reviews") or []:
+            member = label_map[rv].get(str(r.get("label", "")).strip())
+            items = [str(e).strip() for e in (r.get("factual_errors") or []) if str(e).strip()]
+            if member and items:
+                errors.setdefault(member, []).extend(items)
+
+    # The gate. A quoted factual-error allegation always warrants a rebuttal; a numeric
+    # near-tie only does when the reviewers disagree by more than the gap they left.
+    reasons = []
+    if errors:
+        reasons.append("a reviewer alleged a specific factual error in "
+                       + ", ".join(sorted(errors)))
+    gap = contested = None
+    if len(ranking) > 1:
+        top, second = ranking[0], ranking[1]
+        gap = round(per_member[top]["mean"] - per_member[second]["mean"], 4)
+        spreads = [per_member[x]["spread"] for x in (top, second)
+                   if per_member[x]["spread"] is not None]
+        if spreads and gap < max(spreads):
+            reasons.append(f"the top two are {gap} apart but the reviewers disagree by up "
+                           f"to {max(spreads)} about them")
+            spread_by_crit = {
+                crit: max(scores[rv][top][crit] for rv in scores if top in scores[rv])
+                      - min(scores[rv][top][crit] for rv in scores if top in scores[rv])
+                for crit in criteria if sum(1 for rv in scores if top in scores[rv]) > 1
+            }
+            if spread_by_crit:
+                contested = max(spread_by_crit, key=spread_by_crit.get)
+        elif not spreads:
+            reasons.append("only one reviewer scored the leaders, so no disagreement "
+                           "signal is available")
+
+    json.dump({
+        "criteria": criteria,
+        "reviewers": reviewers,
+        "usable_reviewers": len(scores),
+        "ranking": ranking,
+        "responses": per_member,
+        "factual_errors": errors,
+        "gate": {"rebuttal_recommended": bool(reasons), "reasons": reasons,
+                 "top_two_gap": gap, "contested_criterion": contested},
+    }, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
 
 
@@ -561,10 +879,13 @@ def read_prompt(args):
 
 def main():
     ap = argparse.ArgumentParser(description="Dispatch a prompt to external LLM-council members in parallel.")
-    ap.add_argument("--members", default=ALL_MEMBERS,
+    ap.add_argument("--members", default=None,
                     help=f"comma-separated subset of: {', '.join(RUNNERS)} "
-                         f"(default: {ALL_MEMBERS}). `chatgpt` is opt-in: it needs the desktop "
-                         "app already running on a debugging port, and it cannot read --workdir")
+                         f"(default: {DEFAULT_MEMBERS}). The default roster answers through the "
+                         "ChatGPT desktop app rather than `codex`, to spend the conversation "
+                         "allowance instead of Codex quota; --workdir or an explicit "
+                         "--output-schema hands that seat back to codex. A roster given here is "
+                         "used exactly as written")
     ap.add_argument("--prompt", help="prompt text (else --prompt-file, else stdin)")
     ap.add_argument("--prompt-file", help="file containing the prompt")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="per-member timeout in seconds")
@@ -587,20 +908,47 @@ def main():
     ap.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL, help="Claude model (empty = subscription default)")
     ap.add_argument("--opencode-model", default=DEFAULT_OPENCODE_MODEL, help="opencode model slug")
     ap.add_argument("--anonymize", metavar="STAGE1_JSON",
-                    help="don't dispatch; build an anonymized cross-review prompt from a saved stage-1 JSON")
+                    help="don't dispatch; build one anonymized cross-review prompt PER "
+                         "REVIEWER from a saved stage-1 JSON. The reviewers are whatever "
+                         "--members names, so pass it explicitly")
     ap.add_argument("--question-file", help="original question file (required with --anonymize)")
+    ap.add_argument("--criteria", metavar="FILE",
+                    help="one scoring criterion per line, generated for the question at hand. "
+                         "Used by --anonymize (to build the rubric into every review prompt) "
+                         "and by --aggregate (to validate the names back). Both must be given "
+                         f"the SAME file. Default: {', '.join(DEFAULT_CRITERIA)}")
+    ap.add_argument("--aggregate", metavar="LABEL_MAP_JSON",
+                    help="don't dispatch; align every reviewer's scores onto the answers "
+                         "using the nested label_map.json from --anonymize, and emit the "
+                         "ranking, per-criterion means, reviewer disagreement and the "
+                         "rebuttal gate. Reads stage2.<reviewer>.json next to the map")
     args = ap.parse_args()
+
+    # Validate the roster first: --anonymize derives one prompt FILENAME per member, so an
+    # unknown or duplicated name has to be caught before anything is written to disk.
+    members, seen = [], set()
+    for m in (x.strip() for x in (args.members or DEFAULT_MEMBERS).split(",")):
+        if m and m not in seen:
+            seen.add(m)
+            members.append(m)
+    unknown = [m for m in members if m not in RUNNERS]
+    if unknown:
+        sys.exit(f"council.py: unknown member(s): {', '.join(unknown)} (valid: {', '.join(RUNNERS)})")
+    if not members:
+        sys.exit("council.py: --members is empty")
+
+    if args.anonymize and args.aggregate:
+        sys.exit("council.py: --anonymize and --aggregate are separate stages; run one")
 
     if args.anonymize:
         if not args.question_file:
             sys.exit("council.py: --anonymize requires --question-file")
-        anonymize(args.anonymize, args.question_file)
+        anonymize(args.anonymize, args.question_file, members, load_criteria(args.criteria))
         return
 
-    members = [m.strip() for m in args.members.split(",") if m.strip()]
-    unknown = [m for m in members if m not in RUNNERS]
-    if unknown:
-        sys.exit(f"council.py: unknown member(s): {', '.join(unknown)} (valid: {', '.join(RUNNERS)})")
+    if args.aggregate:
+        aggregate(args.aggregate, load_criteria(args.criteria))
+        return
 
     prompt = read_prompt(args)
 
@@ -629,6 +977,13 @@ def main():
             sys.exit(f"council.py: --workdir is not a directory: {workdir}")
     else:
         workdir = tempfile.mkdtemp(prefix="llm-council-")
+
+    if args.members is None:
+        strict_schema = schema is not None and \
+            os.path.realpath(args.output_schema) != os.path.realpath(DEFAULT_SCHEMA)
+        members, swapped = resolve_members(members, borrowed, strict_schema)
+        if swapped:  # stdout is the answer payload; this belongs on stderr
+            print(f"council.py: {swapped}", file=sys.stderr)
 
     try:
         with ThreadPoolExecutor(max_workers=len(members)) as pool:

@@ -1,0 +1,51 @@
+{
+  "title": "Council cross-review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reviews"],
+  "properties": {
+    "reviews": {
+      "type": "array",
+      "description": "One entry per labelled response. Every response in the prompt must appear exactly once.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "scores", "factual_errors"],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "The response label being scored, exactly as written in the prompt (\"A\", \"B\", ...)."
+          },
+          "scores": {
+            "type": "array",
+            "description": "One entry per criterion listed in the prompt, using the criterion names verbatim. Score every criterion for every response, independently — do not form one overall impression and spread it across the criteria.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["criterion", "score", "reason"],
+              "properties": {
+                "criterion": {
+                  "type": "string",
+                  "description": "The criterion name, copied verbatim from the prompt."
+                },
+                "score": {
+                  "type": "integer",
+                  "description": "1 to 100 on THIS criterion alone. 1 = worthless, 50 = borderline, 100 = could not be better. Use the range: two answers that differ should not receive the same number."
+                },
+                "reason": {
+                  "type": "string",
+                  "description": "One line saying why this score rather than ten points higher or lower."
+                }
+              }
+            }
+          },
+          "factual_errors": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Each item quotes a specific erroneous claim from this response and says why it is wrong. Empty array if none. Style, phrasing and preference disagreements do NOT belong here."
+          }
+        }
+      }
+    }
+  }
+}
