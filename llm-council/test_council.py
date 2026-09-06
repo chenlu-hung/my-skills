@@ -36,6 +36,16 @@ open(a[a.index("-o") + 1], "w").write(
     "ARGV=" + json.dumps(a) + "\\nSTDIN=" + json.dumps(sys.stdin.read()))
 """
 
+# The ChatGPT bridge is not a CLI that prints prose: it speaks a JSON envelope
+# ({ok, answer, elapsed_s}), so its stub reports argv from *inside* `answer` and run()
+# then parses it like every other member. Without this stub the default roster resolves
+# `chatgpt-ask` on the real PATH and launches ChatGPT.app in the middle of a test run.
+CHATGPT_STUB = """#!/usr/bin/env python3
+import sys, json
+print(json.dumps({"ok": True, "elapsed_s": 0.1, "answer":
+    "ARGV=" + json.dumps(sys.argv[1:]) + "\\nSTDIN=" + json.dumps(sys.stdin.read())}))
+"""
+
 failures = []
 
 
@@ -47,7 +57,8 @@ def check(label, cond, detail=""):
 
 def stub_dir():
     d = tempfile.mkdtemp(prefix="council-stubs-")
-    for name, body in (("agy", STUB), ("claude", STUB), ("codex", CODEX_STUB)):
+    for name, body in (("agy", STUB), ("claude", STUB), ("codex", CODEX_STUB),
+                       ("chatgpt-ask", CHATGPT_STUB)):
         p = os.path.join(d, name)
         with open(p, "w") as fh:
             fh.write(body)
@@ -152,7 +163,40 @@ def main():
         check("no plan mode", "--mode" not in m["gemini"][0])
         check("no tool denials", "--disallowedTools" not in m["claude"][0])
         check("project settings still loaded", val(m["claude"][0], "--setting-sources") == "project")
-        check("codex still sandboxed", val(m["codex"][0], "-s") == "read-only")
+        _, mcx = run(["--prompt", "Q", "--members", "codex"], stubs)
+        check("codex still sandboxed", val(mcx["codex"][0], "-s") == "read-only")
+
+        # The roster decides which quota a council run spends, so it is worth pinning.
+        # chatgpt holds the GPT seat (conversation allowance, not Codex quota) and
+        # opencode is off the roster entirely.
+        print("default roster:")
+        check("chatgpt holds the GPT seat, not codex", sorted(m) == ["chatgpt", "claude", "gemini"],
+              f"got {sorted(m)}")
+        check("the chatgpt member is dispatched through the bridge",
+              "--prompt-file" in m["chatgpt"][0], str(m["chatgpt"][0]))
+
+        # ...but only the DEFAULT roster is rewritten, and only when the app cannot serve
+        # the run. Getting either half wrong is silent: a member the caller never asked
+        # for answers, or the desktop app answers a question about a repo it cannot see.
+        print("chatgpt -> codex substitution:")
+        proc, mw = run(["--workdir", repo, "--prompt", "Q"], stubs)
+        check("--workdir hands the seat to codex",
+              "codex" in mw and "chatgpt" not in mw, f"got {sorted(mw)}")
+        check("the swap is announced on stderr, not mixed into the answers",
+              "chatgpt -> codex" in proc.stderr and "chatgpt -> codex" not in proc.stdout)
+
+        own = os.path.join(stubs, "own.schema.json")
+        shutil.copy(os.path.join(HERE, "schema", "answer.schema.json"), own)
+        _, msc = run(["--prompt", "Q", "--output-schema", own], stubs)
+        check("an explicit --output-schema hands the seat to codex",
+              "codex" in msc and "chatgpt" not in msc, f"got {sorted(msc)}")
+        check("the default schema does not", "chatgpt" in m and "codex" not in m, f"got {sorted(m)}")
+
+        _, mex = run(["--members", "chatgpt,gemini", "--workdir", repo, "--prompt", "Q"], stubs)
+        check("an explicit roster is never rewritten",
+              sorted(mex) == ["chatgpt", "gemini"], f"got {sorted(mex)}")
+        check("the explicitly-named chatgpt refuses the borrowed dir itself",
+              mex["chatgpt"][0] == [], str(mex["chatgpt"][0]))
 
         # Every CLI child must get stdin=DEVNULL. `codex exec` with an inherited pipe on
         # stdin prints "Reading additional input from stdin..." and waits for a second
@@ -175,7 +219,7 @@ def main():
         # CLI accepts: codex/agy take a FILE, claude takes an inline JSON STRING. Getting the
         # form wrong is silent — the CLI errors and the member just comes back empty.
         print("structured output (default on):")
-        _, ms = run(["--prompt", "Q"], stubs)
+        _, ms = run(["--prompt", "Q", "--members", "codex,gemini,claude"], stubs)
         cdx, gem, cld = ms["codex"][0], ms["gemini"][0], ms["claude"][0]
         check("codex gets --output-schema as a file path",
               (val(cdx, "--output-schema") or "").endswith(".json"), repr(val(cdx, "--output-schema")))
@@ -188,7 +232,7 @@ def main():
         check("claude keeps --disallowedTools last even with a schema",
               "--disallowedTools" not in cld or cld[-4:] == ["Write", "Edit", "NotebookEdit", "Bash"])
 
-        _, mn = run(["--prompt", "Q", "--no-output-schema"], stubs)
+        _, mn = run(["--prompt", "Q", "--no-output-schema", "--members", "codex,gemini,claude"], stubs)
         check("--no-output-schema drops it from every member",
               not any(f in mn[m][0] for m, f in (("codex", "--output-schema"),
                                                 ("gemini", "--json-schema"),

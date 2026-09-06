@@ -1,6 +1,6 @@
 ---
 name: llm-council
-description: Convenes a multi-model "council" to answer a question, then synthesizes a single best answer — inspired by Karpathy's llm-council. Each member runs through its own subscription/sign-in CLI, not an API key: Codex (ChatGPT sub), Gemini (Antigravity `agy`), and Claude (`claude -p`). This Claude Code session chairs the synthesis. Use when the user says "ask the council", "llm council", "convene the council", "second opinion", "what do other models think", "compare models on this", "ask codex and gemini too", "make the models debate", "have them cross-examine each other", or invokes "/llm-council".
+description: Convenes a multi-model "council" to answer a question, then synthesizes a single best answer — inspired by Karpathy's llm-council. Each member runs through its own subscription/sign-in CLI, not an API key: ChatGPT (the desktop app, via `chatgpt-ask`), Gemini (Antigravity `agy`), and Claude (`claude -p`), with Codex (`codex exec`) standing in where the desktop app cannot reach. This Claude Code session chairs the synthesis. Use when the user says "ask the council", "llm council", "convene the council", "second opinion", "what do other models think", "compare models on this", "ask codex and gemini too", "make the models debate", "have them cross-examine each other", or invokes "/llm-council".
 argument-hint: "\"<question>\" | debate \"<question>\" | quick \"<question>\" | raw \"<question>\""
 ---
 
@@ -14,22 +14,38 @@ OpenRouter.
 
 ## Members
 
-| Member | Reached via | Auth (subscription / sign-in, not API key) |
-|---|---|---|
-| **Codex** | `codex exec` | ChatGPT subscription (`auth_mode: chatgpt` in `~/.codex/auth.json`) |
-| **Gemini** | Antigravity `agy -p` | Google Antigravity sign-in (Gemini models) |
-| **Claude** | `claude -p` | Claude subscription — runs as an **independent member**, isolated from the chair |
-| **opencode** | `opencode run` | opencode's own free tier — costs no subscription quota |
-| **ChatGPT** *(opt-in)* | `chatgpt-ask`, over the desktop app's debugging port | the app's own sign-in |
+| Member | Reached via | Auth (subscription / sign-in, not API key) | On the default roster |
+|---|---|---|---|
+| **ChatGPT** | `chatgpt-ask`, over the desktop app's debugging port | the app's own sign-in | yes |
+| **Gemini** | Antigravity `agy -p` | Google Antigravity sign-in (Gemini models) | yes |
+| **Claude** | `claude -p` | Claude subscription — runs as an **independent member**, isolated from the chair | yes |
+| **Codex** | `codex exec` | ChatGPT subscription (`auth_mode: chatgpt` in `~/.codex/auth.json`) | only as ChatGPT's stand-in |
+| **opencode** | `opencode run` | opencode's own free tier — costs no subscription quota | no — name it in `--members` |
 
-The free model slugs opencode offers rotate, and a withdrawn one fails every call rather
-than falling back. `opencode models | grep free` lists the live ones; the default is set in
-`DEFAULT_OPENCODE_MODEL`. This member is refused on `--workdir`: unlike the others it has no
-read-only mode to hold it to.
+**GPT sits on the council through the desktop app, not Codex.** For a council answer — prose
+from a self-contained prompt, no repo, no tool calls — `chatgpt` and `codex` are the same
+voice off a different meter, and the app's meter is the ChatGPT **conversation** allowance
+instead of Codex quota. So `chatgpt` holds the seat and `codex` is kept for the two kinds of
+run the app cannot serve. `council.py` makes that swap itself and announces it on stderr:
 
-`chatgpt` answers out of the ChatGPT **conversation** allowance rather than the Codex quota
-that `codex` spends, which is the reason to reach for it. It is opt-in because it needs setup
-and carries limits the other members don't — see [The ChatGPT member](#the-chatgpt-member).
+- **`--workdir`** — the app answers from inside a GUI and has no filesystem, so a borrowed
+  repo is invisible to it.
+- **an explicit `--output-schema`** — a GUI has no such flag, so the schema is appended to the
+  prompt as a request. The default answer schema is fine that way (it is rendered back to
+  prose regardless, and a member that ignores it still contributes), but a caller who names
+  its own schema is reading `structured` downstream and needs the contract kept.
+
+The swap rewrites the **default** roster only. A roster given in `--members` is used exactly
+as written — `chatgpt` then refuses `--workdir` itself rather than being quietly answered by
+a member nobody asked for.
+
+**opencode is off the default roster.** Its free models sit a rung below the rest, and a weak
+answer costs a council more than a missing one: it still gets ranked, still gets synthesized,
+still takes a reviewer's attention in Stage 2. Add it back with `--members` when a fourth
+voice is worth more than its quality. Its free slugs also rotate, and a withdrawn one fails
+every call rather than falling back — `opencode models | grep free` lists the live ones, and
+the default is `DEFAULT_OPENCODE_MODEL`. It is refused on `--workdir` too: unlike the others
+it has no read-only mode to hold it to.
 
 Members run **in parallel** through `council.py`, each in a throwaway temp dir —
 this skill never passes `--workdir`, so no member can see the user's repo (see Rules).
@@ -37,10 +53,8 @@ this skill never passes `--workdir`, so no member can see the user's repo (see R
 a member answer, because the `claude` member already carries Claude's independent voice (run
 with `--setting-sources project` so the session's hooks/memory don't leak into it). The CLIs
 are stateless one-shot calls, so every prompt must be self-contained. `council.py` defaults to
-**`codex,gemini,claude,opencode`** (`ALL_MEMBERS`); pass `--members` to change that
-(`--members chatgpt,gemini,claude` swaps Codex out for the desktop app when Codex quota is
-what's being conserved). Stage 2 names its reviewers explicitly rather than taking this
-default — see Stage 2.
+**`chatgpt,gemini,claude`** (`DEFAULT_MEMBERS`); pass `--members` to change that. Stage 2 names
+its reviewers explicitly rather than taking this default — see Stage 2.
 
 ## The ChatGPT member
 
@@ -58,7 +72,7 @@ start on top of the answer itself.
 control can't be found the member *refuses* rather than filing the thread for real;
 `--allow-history` overrides that if the user asks for it.
 
-It honours `--schema` the same way the others do, but by *asking* rather than enforcing:
+It honours `--output-schema` the same way `opencode` does, but by *asking* rather than enforcing:
 there is no `--output-schema` in a GUI, so the schema is appended to the prompt and
 `parse_structured` falls back to prose if the reply is not JSON.
 
@@ -274,14 +288,16 @@ Stage 2.5 before synthesizing.
 Each member is optional — if its CLI is absent or signed out, `council.py` returns that member
 as `ok: false` and the council proceeds with the rest.
 
-- **`codex`** — signed into a ChatGPT subscription. Verify `~/.codex/auth.json` has
-  `"auth_mode": "chatgpt"`; else `codex login`.
+- **`chatgpt-ask`** (plus ChatGPT.app and `uv`) — on the default roster, so a plain run needs
+  it. The app is launched and quit for you, so it does not need to be running beforehand. If
+  the command is missing, that member returns `ok: false` telling you to link it; see
+  `chatgpt-bridge/`. macOS only.
 - **`agy`** (Antigravity CLI) — signed in for Gemini models.
 - **`claude`** (Claude Code) — the same subscription as this session.
+- **`codex`** — signed into a ChatGPT subscription. Verify `~/.codex/auth.json` has
+  `"auth_mode": "chatgpt"`; else `codex login`. Not on the default roster, but a Stage-2
+  reviewer and ChatGPT's stand-in on `--workdir`, so a full run still reaches it.
 - **`python3`** (stdlib only — the `chatgpt` member's own dependency is handled by `uv`).
-- **`chatgpt-ask`** (plus ChatGPT.app and `uv`) — only for the `chatgpt` member. The app is
-  launched and quit for you, so it does not need to be running beforehand. If the command is
-  missing, that member returns `ok: false` telling you to link it; see `chatgpt-bridge/`.
 
 `council.py` degrades gracefully: a missing CLI, timeout, or crash becomes a per-member
 `ok: false` with an `error` string rather than failing the whole run.
@@ -322,8 +338,9 @@ Every member is bound to `schema/answer.schema.json` (`answer`, `key_points`, `c
 | opencode | *none — no `--output-schema` equivalent exists* | the schema is appended to the prompt; conformance is voluntary |
 | chatgpt | *none — a GUI has no such flag* | same: appended to the prompt, prose accepted back |
 
-`opencode` is in the default roster, so a default run already contains one member whose
-structure is unenforced. `parse_structured()` does `json.loads` and no validation, which is
+`chatgpt` is on the default roster, so a default run already contains one member whose
+structure is asked for rather than enforced (an explicit `--output-schema` is exactly what
+swaps that member for `codex`). `parse_structured()` does `json.loads` and no validation, which is
 harmless while the fields are prose — but anything that does *arithmetic* on member output
 must validate locally first.
 

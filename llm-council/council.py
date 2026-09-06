@@ -11,11 +11,13 @@ Each member authenticates through its own *subscription / sign-in*, not an API k
   - claude    -> Claude Code headless (`claude -p`) — Claude as an independent member,
                  separate from the orchestrating session that chairs the council
   - opencode  -> opencode CLI on free DeepSeek, so it costs no subscription quota
-  - chatgpt   -> the ChatGPT desktop app via `chatgpt-ask` (opt-in) — spends the
-                 conversation allowance rather than Codex quota
+                 (off the default roster — see DEFAULT_MEMBERS)
+  - chatgpt   -> the ChatGPT desktop app via `chatgpt-ask` — spends the conversation
+                 allowance rather than Codex quota, which is why it, and not codex,
+                 holds the GPT seat by default
 
 Usage:
-    python3 council.py --prompt-file q.txt                 # all members
+    python3 council.py --prompt-file q.txt                 # the default roster
     python3 council.py --members codex,claude --prompt "..."   # a subset
     echo "question" | python3 council.py                   # prompt via stdin
     python3 council.py --prompt-file review.txt --workdir /path/to/repo
@@ -71,7 +73,20 @@ DEFAULT_CLAUDE_MODEL = "claude-opus-5"  # pinned: the reviewer roster names it e
 # (opencode/deepseek-v4-flash-free) was withdrawn and every call returned a server
 # error. `opencode models | grep free` lists what is currently live.
 DEFAULT_OPENCODE_MODEL = "opencode/mimo-v2.5-free"
-ALL_MEMBERS = "codex,gemini,claude,opencode"
+
+# Who answers when --members is not given.
+#
+# `chatgpt` holds the GPT seat rather than `codex`: for a council answer — prose from a
+# self-contained prompt, no repo, no tool calls — the two are the same voice off a
+# different meter, and the desktop app's meter is the conversation allowance instead of
+# Codex quota. resolve_members() hands the seat back to codex for the runs the app
+# cannot serve.
+#
+# `opencode` is off the roster. Its free slugs sit a rung below the rest, and a weak
+# answer costs a council more than a missing one: it is still ranked, still synthesized,
+# and still takes a reviewer's attention in Stage 2. Name it in --members when a fourth
+# voice is worth more than its quality.
+DEFAULT_MEMBERS = "chatgpt,gemini,claude"
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")  # strip terminal color codes from CLI stdout
 
@@ -521,6 +536,37 @@ CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude",
            "opencode": "opencode", "chatgpt": "chatgpt-ask"}
 
 
+def resolve_members(members, borrowed, strict_schema):
+    """Hand the GPT seat back to `codex` for the runs the ChatGPT app cannot serve.
+
+    The app buys its cheaper meter with two gaps the CLI does not have: it has no
+    filesystem, so a borrowed --workdir is invisible to it, and there is no
+    `--output-schema` in a GUI, so a schema is a request it is free to decline. Either
+    one turns it from a cheaper member into a member answering a different question.
+
+    The default answer schema does not count as strict. It is rendered back to prose
+    either way and `parse_structured` accepts a member that ignored it, so asking is
+    enough. A caller who names its own schema is reading `structured` downstream and
+    needs the contract kept — that one counts.
+
+    Only the DEFAULT roster is rewritten. An explicit --members is the caller's decision
+    and is left exactly as given; `chatgpt` then refuses --workdir on its own rather than
+    being quietly answered by a member nobody asked for.
+
+    Returns (members, reason) — reason is "" when nothing was swapped.
+    """
+    if "chatgpt" not in members or "codex" in members:
+        return members, ""
+    if borrowed:
+        need = "--workdir, and the desktop app has no filesystem"
+    elif strict_schema:
+        need = "an enforced --output-schema, which a GUI cannot promise"
+    else:
+        return members, ""
+    return ([("codex" if m == "chatgpt" else m) for m in members],
+            f"chatgpt -> codex: this run needs {need}")
+
+
 def dispatch(name, prompt, model, timeout, workdir, borrowed, schema=None):
     """Wrap a runner so a missing CLI / timeout / crash becomes a structured error, never an exception."""
     try:
@@ -833,10 +879,13 @@ def read_prompt(args):
 
 def main():
     ap = argparse.ArgumentParser(description="Dispatch a prompt to external LLM-council members in parallel.")
-    ap.add_argument("--members", default=ALL_MEMBERS,
+    ap.add_argument("--members", default=None,
                     help=f"comma-separated subset of: {', '.join(RUNNERS)} "
-                         f"(default: {ALL_MEMBERS}). `chatgpt` is opt-in: it needs the desktop "
-                         "app already running on a debugging port, and it cannot read --workdir")
+                         f"(default: {DEFAULT_MEMBERS}). The default roster answers through the "
+                         "ChatGPT desktop app rather than `codex`, to spend the conversation "
+                         "allowance instead of Codex quota; --workdir or an explicit "
+                         "--output-schema hands that seat back to codex. A roster given here is "
+                         "used exactly as written")
     ap.add_argument("--prompt", help="prompt text (else --prompt-file, else stdin)")
     ap.add_argument("--prompt-file", help="file containing the prompt")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="per-member timeout in seconds")
@@ -878,7 +927,7 @@ def main():
     # Validate the roster first: --anonymize derives one prompt FILENAME per member, so an
     # unknown or duplicated name has to be caught before anything is written to disk.
     members, seen = [], set()
-    for m in (x.strip() for x in args.members.split(",")):
+    for m in (x.strip() for x in (args.members or DEFAULT_MEMBERS).split(",")):
         if m and m not in seen:
             seen.add(m)
             members.append(m)
@@ -928,6 +977,13 @@ def main():
             sys.exit(f"council.py: --workdir is not a directory: {workdir}")
     else:
         workdir = tempfile.mkdtemp(prefix="llm-council-")
+
+    if args.members is None:
+        strict_schema = schema is not None and \
+            os.path.realpath(args.output_schema) != os.path.realpath(DEFAULT_SCHEMA)
+        members, swapped = resolve_members(members, borrowed, strict_schema)
+        if swapped:  # stdout is the answer payload; this belongs on stderr
+            print(f"council.py: {swapped}", file=sys.stderr)
 
     try:
         with ThreadPoolExecutor(max_workers=len(members)) as pool:
