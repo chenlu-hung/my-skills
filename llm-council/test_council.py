@@ -23,6 +23,10 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 COUNCIL = os.path.join(HERE, "council.py")
 
+# schema_errors() is pure, so it is tested by calling it rather than through a subprocess.
+sys.path.insert(0, HERE)
+import council  # noqa: E402
+
 STUB = """#!/usr/bin/env python3
 import sys, json
 print("ARGV=" + json.dumps(sys.argv[1:]) + "\\nSTDIN=" + json.dumps(sys.stdin.read()))
@@ -46,6 +50,24 @@ print(json.dumps({"ok": True, "elapsed_s": 0.1, "answer":
     "ARGV=" + json.dumps(sys.argv[1:]) + "\\nSTDIN=" + json.dumps(sys.stdin.read())}))
 """
 
+# The retry path needs a member that gets it wrong the first time. Every call is a fresh
+# process, so "which attempt is this" lives in a counter file beside the stub, and each
+# attempt's prompt is written out so the retry's contents can be asserted.
+RETRY_STUB = """#!/usr/bin/env python3
+import sys, json, os
+here = os.path.dirname(os.path.abspath(__file__))
+log = os.path.join(here, "calls")
+n = sum(1 for _ in open(log)) if os.path.exists(log) else 0
+a = sys.argv[1:]
+open(os.path.join(here, "prompt.%d.txt" % n), "w", encoding="utf-8").write(
+    open(a[a.index("--prompt-file") + 1], encoding="utf-8").read())
+open(log, "a").write("call\\n")
+body = ({"answer": "FIRST TRY", "key_points": [], "confidence": "certainly", "caveats": []}
+        if n < FAIL_UNTIL else
+        {"answer": "SECOND TRY", "key_points": ["K"], "confidence": "high", "caveats": []})
+print(json.dumps({"ok": True, "elapsed_s": 0.1, "answer": json.dumps(body)}))
+"""
+
 failures = []
 
 
@@ -53,6 +75,22 @@ def check(label, cond, detail=""):
     print(("  ok   " if cond else "  FAIL ") + label + (f" — {detail}" if detail and not cond else ""))
     if not cond:
         failures.append(label)
+
+
+def chatgpt_stub_dir(fail_until):
+    """A stub dir whose `chatgpt-ask` returns a schema-violating object for its first
+    `fail_until` calls. 1 exercises the retry succeeding, 2 exercises it running out."""
+    d = stub_dir()
+    p = os.path.join(d, "chatgpt-ask")
+    with open(p, "w") as fh:
+        fh.write(RETRY_STUB.replace("FAIL_UNTIL", str(fail_until)))
+    os.chmod(p, 0o755)
+    return d
+
+
+def calls_made(stubs):
+    log = os.path.join(stubs, "calls")
+    return sum(1 for _ in open(log)) if os.path.exists(log) else 0
 
 
 def stub_dir():
@@ -188,9 +226,8 @@ def main():
         own = os.path.join(stubs, "own.schema.json")
         shutil.copy(os.path.join(HERE, "schema", "answer.schema.json"), own)
         _, msc = run(["--prompt", "Q", "--output-schema", own], stubs)
-        check("an explicit --output-schema hands the seat to codex",
-              "codex" in msc and "chatgpt" not in msc, f"got {sorted(msc)}")
-        check("the default schema does not", "chatgpt" in m and "codex" not in m, f"got {sorted(m)}")
+        check("a schema does not swap the member — run_chatgpt validates and re-asks",
+              "chatgpt" in msc and "codex" not in msc, f"got {sorted(msc)}")
 
         _, mex = run(["--members", "chatgpt,gemini", "--workdir", repo, "--prompt", "Q"], stubs)
         check("an explicit roster is never rewritten",
@@ -203,6 +240,76 @@ def main():
         # prompt, truncating the turn: no `-o` file, and `codex doctor` stays all green.
         # Feed the parent a non-empty stdin the way an agent harness does, and check none
         # of it leaks into the children.
+        # A GUI cannot be handed --output-schema, so the schema is a request and the reply
+        # is checked here. Both halves matter: a fixable miss must cost one extra call and
+        # then conform, and an unfixable one must not leak a shape that was never met into
+        # `structured`, where --aggregate would do arithmetic on it.
+        # The gate the retry decides on. Under-reporting sends a bad object downstream;
+        # over-reporting re-asks a member that was already right, at the cost of a whole
+        # extra app round-trip.
+        print("schema_errors (the gate the retry decides on):")
+        answer_schema = json.load(open(os.path.join(HERE, "schema", "answer.schema.json")))
+        review_schema = json.load(open(os.path.join(HERE, "schema", "review.schema.json")))
+        good = {"answer": "a", "key_points": [], "confidence": "high", "caveats": []}
+
+        def errs(value, schema=None):
+            return council.schema_errors(value, schema or answer_schema)
+
+        check("a conforming answer reports nothing", errs(good) == [])
+        check("a value outside an enum is caught",
+              len(errs({**good, "confidence": "certainly"})) == 1, str(errs({**good, "confidence": "certainly"})))
+        check("every missing required key is named",
+              len(errs({"answer": "a", "confidence": "high"})) == 2)
+        check("additionalProperties: false is enforced",
+              len(errs({**good, "extra": 1})) == 1)
+        check("a wrong scalar type is caught", len(errs({**good, "answer": 1})) == 1)
+        check("array items are checked individually",
+              "key_points[1]" in (errs({**good, "key_points": ["k", 2]}) or [""])[0])
+        check("prose where an object was asked for is caught", len(errs("not an object")) == 1)
+
+        def scored(v):
+            return {"reviews": [{"label": "A", "factual_errors": [],
+                                 "scores": [{"criterion": "c", "score": v, "reason": "r"}]}]}
+        check("a nested schema validates all the way down",
+              errs(scored(85), review_schema) == [], str(errs(scored(85), review_schema)))
+        check("85.0 is an integer, as JSON Schema says", errs(scored(85.0), review_schema) == [])
+        check("\"85\" is not", len(errs(scored("85"), review_schema)) == 1)
+        # bool is an int in Python and would otherwise slip through `isinstance(v, int)`.
+        check("True is not either", len(errs(scored(True), review_schema)) == 1)
+        # Rejecting a good answer costs a member, so an unmodelled keyword must not fail.
+        check("a keyword the gate does not model is ignored, not failed",
+              council.schema_errors("abc", {"type": "string", "minLength": 99}) == [])
+
+        print("schema validate-and-retry (the chatgpt member):")
+        rs = chatgpt_stub_dir(fail_until=1)
+        proc, _ = run(["--prompt", "Q", "--members", "chatgpt"], rs)
+        res = json.loads(proc.stdout)["members"]["chatgpt"]
+        check("a schema miss is re-asked exactly once", calls_made(rs) == 2, str(calls_made(rs)))
+        check("the conforming retry is what comes back",
+              (res.get("structured") or {}).get("answer") == "SECOND TRY", str(res.get("structured")))
+        check("a satisfied retry reports no schema_error", "schema_error" not in res, str(res))
+        retry_prompt = open(os.path.join(rs, "prompt.1.txt"), encoding="utf-8").read()
+        check("the retry quotes the rejected reply", "FIRST TRY" in retry_prompt)
+        check("the retry names the violation", "'certainly' is not one of" in retry_prompt,
+              retry_prompt[-200:])
+        check("the retry still carries the original question", "Q" in retry_prompt)
+        shutil.rmtree(rs, ignore_errors=True)
+
+        rs2 = chatgpt_stub_dir(fail_until=9)
+        proc, _ = run(["--prompt", "Q", "--members", "chatgpt"], rs2)
+        res2 = json.loads(proc.stdout)["members"]["chatgpt"]
+        check("the retry is not looped", calls_made(rs2) == 2, str(calls_made(rs2)))
+        check("an unfixable miss still contributes its prose",
+              res2["ok"] and "FIRST TRY" in res2["answer"], str(res2)[:120])
+        check("...but drops `structured` rather than passing on a shape never met",
+              res2["structured"] is None, str(res2["structured"]))
+        check("...and says why in schema_error",
+              "certainly" in res2.get("schema_error", ""), str(res2.get("schema_error")))
+        shutil.rmtree(rs2, ignore_errors=True)
+
+        _, mns = run(["--prompt", "Q", "--members", "chatgpt", "--no-output-schema"], stubs)
+        check("--no-output-schema asks once and accepts prose", mns["chatgpt"][0] != [])
+
         print("stdin isolation (codex exec truncates on an inherited pipe):")
         # One member at a time: members run concurrently, so whichever child reads the
         # inherited pipe first drains it — testing them together makes the leak

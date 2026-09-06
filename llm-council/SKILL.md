@@ -25,15 +25,13 @@ OpenRouter.
 **GPT sits on the council through the desktop app, not Codex.** For a council answer — prose
 from a self-contained prompt, no repo, no tool calls — `chatgpt` and `codex` are the same
 voice off a different meter, and the app's meter is the ChatGPT **conversation** allowance
-instead of Codex quota. So `chatgpt` holds the seat and `codex` is kept for the two kinds of
-run the app cannot serve. `council.py` makes that swap itself and announces it on stderr:
+instead of Codex quota. So `chatgpt` holds the seat, and `codex` takes it back for the one
+kind of run the app cannot serve: **`--workdir`**, because the app answers from inside a GUI
+and has no filesystem, so a borrowed repo is invisible to it. `council.py` makes that swap
+itself and announces it on stderr.
 
-- **`--workdir`** — the app answers from inside a GUI and has no filesystem, so a borrowed
-  repo is invisible to it.
-- **an explicit `--output-schema`** — a GUI has no such flag, so the schema is appended to the
-  prompt as a request. The default answer schema is fine that way (it is rendered back to
-  prose regardless, and a member that ignores it still contributes), but a caller who names
-  its own schema is reading `structured` downstream and needs the contract kept.
+A schema is *not* a reason to swap. A GUI has no `--output-schema` either, but that gap is
+closed in `run_chatgpt` instead — see [Structured output](#structured-output-is-on-by-default).
 
 The swap rewrites the **default** roster only. A roster given in `--members` is used exactly
 as written — `chatgpt` then refuses `--workdir` itself rather than being quietly answered by
@@ -72,11 +70,11 @@ start on top of the answer itself.
 control can't be found the member *refuses* rather than filing the thread for real;
 `--allow-history` overrides that if the user asks for it.
 
-It honours `--output-schema` the same way `opencode` does, but by *asking* rather than enforcing:
-there is no `--output-schema` in a GUI, so the schema is appended to the prompt and
-`parse_structured` falls back to prose if the reply is not JSON.
+It honours `--output-schema` by *asking* and then *checking* — the schema goes into the
+prompt, the reply is validated against it, and a reply that misses is quoted back with its
+errors and asked again once. See [Structured output](#structured-output-is-on-by-default).
 
-Three limits the CLI members don't have:
+Two limits the CLI members don't have:
 
 - **No filesystem.** It answers from inside the app, so `--workdir` is unreadable to it. The
   member refuses outright rather than answering as though it had read the repo.
@@ -123,6 +121,10 @@ Check `members.<name>.ok` in the JSON. If a member has `ok: false`, note who dro
 member failed, stop**: report the dropouts and say there is no council answer. Do not
 synthesize one from nothing — a council of zero is not a small council. You do **not**
 add your own answer here — the `claude` member already represents Claude independently.
+
+A member carrying a **`schema_error`** is *not* a dropout: its `ok` is `true` and its prose
+answered the question; only `structured` was dropped. Nothing in Stage 1 needs the object, so
+read the answer and move on.
 
 You now hold one answer per member.
 
@@ -336,13 +338,31 @@ Every member is bound to `schema/answer.schema.json` (`answer`, `key_points`, `c
 | agy | `--json-schema <FILE>` **plus `--output-format json`** — it refuses the schema otherwise | envelope, parsed object under `structured_output` |
 | claude | `--json-schema '<inline JSON>'` — **a path is rejected** | stdout is raw JSON |
 | opencode | *none — no `--output-schema` equivalent exists* | the schema is appended to the prompt; conformance is voluntary |
-| chatgpt | *none — a GUI has no such flag* | same: appended to the prompt, prose accepted back |
+| chatgpt | *none — a GUI has no such flag* | appended to the prompt, then **validated and re-asked once** |
 
-`chatgpt` is on the default roster, so a default run already contains one member whose
-structure is asked for rather than enforced (an explicit `--output-schema` is exactly what
-swaps that member for `codex`). `parse_structured()` does `json.loads` and no validation, which is
-harmless while the fields are prose — but anything that does *arithmetic* on member output
-must validate locally first.
+**How the chatgpt member closes the gap.** `schema_errors()` checks the reply against the
+schema; a reply that misses is quoted back to the app with its errors and asked again, once
+(`SCHEMA_RETRIES`). The retry goes into a *fresh* temporary chat like every other call, so the
+correction has to travel in the prompt — it carries the original question, the rejected reply,
+and the specific violations. The retry spends what the first attempt left of `--timeout`, not a
+second budget, and is skipped when less than `MIN_RETRY_BUDGET` seconds remain.
+
+This is weaker than the CLIs' constrained decoding, which cannot emit a non-conforming answer
+at all. When both attempts miss, the member still contributes: the **first** attempt's prose is
+kept (the retry's prompt was half schema-correction, so its prose is the more polluted of the
+two), `structured` is set to `null` rather than passed on as a shape that was never met, and a
+**`schema_error`** key says what was wrong. `ok` stays `true` — it is a usable answer without a
+usable object, not a dropout.
+
+`schema_errors()` is a gate, not a spec-complete validator: it models `type`, `enum`,
+`required`, `properties`, `items` and `additionalProperties: false`, and **ignores** any other
+keyword rather than failing it, because rejecting a good answer costs a member while an exotic
+constraint slipping through costs nothing a reader won't see. Both schemas in `schema/` are
+covered in full.
+
+`opencode` is still asked rather than checked. `parse_structured()` does `json.loads` and no
+validation, so anything that does *arithmetic* on that member's output must validate locally
+first — which `--aggregate` does.
 
 **The JSON is rendered straight back to Markdown into `answer`, with the raw object kept under
 `structured`.** That is what makes the default safe: Stage-3 synthesis, `--anonymize`, and the
