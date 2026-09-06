@@ -158,6 +158,67 @@ def render_structured(obj):
     return "```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```"
 
 
+JSON_TYPES = {"object": dict, "array": list, "string": str,
+              "boolean": bool, "null": type(None)}
+
+
+def _type_ok(value, want):
+    """JSON Schema's type test, with Python's two traps handled: `True` is an `int` here
+    but is not an integer in JSON, and `85.0` is."""
+    if want == "integer":
+        return ((isinstance(value, int) and not isinstance(value, bool))
+                or (isinstance(value, float) and value.is_integer()))
+    if want == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    known = JSON_TYPES.get(want)
+    return isinstance(value, known) if known is not None else True
+
+
+def schema_errors(value, schema, path="$"):
+    """Check `value` against the subset of JSON Schema the council's schemas use — type,
+    enum, required, properties, items, `additionalProperties: false` — and return one
+    readable line per violation, empty when it conforms.
+
+    This is a gate, not a validator. A keyword it does not model is IGNORED rather than
+    failed: rejecting a good answer costs the council a member, while letting an exotic
+    constraint through costs nothing that the reader will not see. Both schemas in
+    `schema/` are covered in full.
+
+    It exists for the members whose schema is a request rather than a flag. `run_chatgpt`
+    validates against it and re-asks; the CLI members are already constrained by their
+    own `--output-schema` and never reach it.
+    """
+    if not isinstance(schema, dict):
+        return []
+    want = schema.get("type")
+    if isinstance(want, str) and not _type_ok(value, want):
+        # Nothing below this can be meaningful once the type is wrong, and reporting the
+        # children of a string as if it were an object only buries the real error.
+        return [f"{path}: expected {want}, got {type(value).__name__}"]
+
+    errs = []
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        errs.append(f"{path}: {value!r} is not one of {enum}")
+
+    if isinstance(value, dict):
+        props = schema.get("properties") or {}
+        errs += [f"{path}: required key {k!r} is missing"
+                 for k in (schema.get("required") or []) if k not in value]
+        if schema.get("additionalProperties") is False:
+            errs += [f"{path}: unexpected key {k!r}" for k in value if k not in props]
+        for key, sub_schema in props.items():
+            if key in value:
+                errs += schema_errors(value[key], sub_schema, f"{path}.{key}")
+
+    items = schema.get("items")
+    if isinstance(value, list) and isinstance(items, dict):
+        for i, item in enumerate(value):
+            errs += schema_errors(item, items, f"{path}[{i}]")
+
+    return errs
+
+
 FENCED = re.compile(r"\A```[A-Za-z]*\s*\n(.*?)\n?```\s*\Z", re.S)
 
 
@@ -449,6 +510,85 @@ def chatgpt_ask_command():
     return None
 
 
+# "matching this schema" reads to the app as "fill this template in", and it answers by
+# echoing the schema with the reply buried in a `description`. Asking for an instance
+# explicitly is what stops that.
+SCHEMA_ASK = ("Respond with ONLY a JSON object that CONFORMS to this JSON Schema. Return an "
+              "instance of it, not the schema itself:\n{schema}\n\nEmit raw JSON: no code "
+              "fence, and no backslash-escaping of Markdown punctuation such as underscores.")
+
+# One retry, not three. The failures this catches — a missing key, a value outside an enum,
+# prose where an object was asked for — are the kind a model fixes once it is shown them;
+# a model that misses twice is not converging, and every attempt is another app round-trip
+# out of the caller's timeout.
+SCHEMA_RETRIES = 1
+# Below this there is not enough of the budget left to launch the app and get an answer, so
+# a retry would only convert a usable reply into a timeout.
+MIN_RETRY_BUDGET = 60
+# Enough of the rejected reply to make the errors legible without doubling the prompt.
+REJECTED_QUOTED = 1500
+
+
+def chatgpt_retry_prompt(prompt, schema, rejected, errs):
+    """Re-ask, carrying the rejected reply and the reasons it was rejected.
+
+    Every bridge call opens its own temporary chat, so the model cannot see what it just
+    wrote. The correction has to travel in the prompt or it is not a correction at all.
+    """
+    return (f"{prompt}\n\n" + SCHEMA_ASK.format(schema=schema[1])
+            + "\n\nAn earlier reply to this same question was rejected for not matching the "
+              "schema. Do not repeat it.\n\nRejected reply:\n"
+            + (rejected or "").strip()[:REJECTED_QUOTED]
+            + "\n\nWhat was wrong with it:\n"
+            + "\n".join(f"- {e}" for e in errs[:8]))
+
+
+def chatgpt_once(bridge, prompt, budget):
+    """One round-trip through the bridge -> (raw_answer, ok, elapsed_s, error)."""
+    promptdir = tempfile.mkdtemp(prefix="council-chatgpt-")
+    promptfile = os.path.join(promptdir, "question.txt")
+    try:
+        with open(promptfile, "w", encoding="utf-8") as fh:
+            fh.write(prompt)
+        cmd = bridge + ["--prompt-file", promptfile, "--json", "--timeout", str(budget)]
+        t0 = time.time()
+        # +60: the script may have to relaunch the app before it can ask, and
+        # a cold start costs about 15s on top of the model's own timeout.
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=budget + 60,
+                              stdin=subprocess.DEVNULL)
+        elapsed = round(time.time() - t0, 1)
+    finally:
+        shutil.rmtree(promptdir, ignore_errors=True)
+
+    try:
+        result = json.loads(proc.stdout)
+    except (TypeError, ValueError):
+        err = (proc.stderr or "").strip()[-600:] or f"exit {proc.returncode}, unreadable output"
+        return "", False, elapsed, err
+    return (result.get("answer") or "", bool(result.get("ok")),
+            result.get("elapsed_s", elapsed), result.get("error", ""))
+
+
+def chatgpt_parse(raw, schema):
+    """The app's reply -> (rendered answer, structured object or None), undoing the two
+    ways a GUI mangles JSON on its way out."""
+    raw = unfence(raw)
+    answer, structured = parse_structured(raw)
+    if schema and structured is None:
+        # Asked for JSON, got JSON-shaped prose: the app writes answers as Markdown, so it
+        # escapes punctuation ("COUNCIL\_UV\_OK") and `\_` is not a defined JSON escape.
+        # Drop backslashes before characters JSON gives no meaning to, keeping the seven
+        # real escapes intact.
+        answer, structured = parse_structured(re.sub(r'\\([^"\\/bfnrtu])', r"\1", raw))
+    if isinstance(structured, dict) and "properties" in structured and \
+            structured.get("type") == "object":
+        # It echoed the schema back instead of instantiating it. Treat that as
+        # unstructured rather than letting a schema document travel downstream
+        # as if it were an answer.
+        structured = None
+    return answer, structured
+
+
 def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
     """ChatGPT desktop app, driven over its debugging port by the `chatgpt-ask` bridge.
 
@@ -457,14 +597,16 @@ def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
     stops the app itself and asks in a temporary chat, so nothing has to be set up
     beforehand and no thread is left in the user's history.
 
-    Two things it cannot do that the CLI members can:
+    A GUI has no `--output-schema`, so the schema is appended to the prompt as a request and
+    the reply is checked against it here: a reply that misses is quoted back with its errors
+    and asked again, once. That closes most of the gap to a constrained CLI, but not all of
+    it — the CLIs cannot emit a non-conforming answer at all, while this one can still fail
+    twice. When it does, the prose is kept, `structured` is dropped rather than passed on as
+    a shape that was never met, and `schema_error` says so.
 
-    1. Read a borrowed `--workdir`. It answers from inside the app and has no filesystem, so
-       it refuses rather than answering from the prompt alone while the caller believes it
-       reviewed their repo.
-    2. Enforce a schema. There is no `--output-schema` equivalent in the UI, so the schema is
-       appended to the prompt as a request. `parse_structured` already degrades to prose when
-       a member ignores it, so a non-JSON reply still counts as an answer.
+    The one thing it still cannot do is read a borrowed `--workdir`: it answers from inside
+    the app and has no filesystem, so it refuses rather than answering from the prompt alone
+    while the caller believes it reviewed their repo.
     """
     if borrowed:
         return {"ok": False, "answer": "", "structured": None, "model": "desktop app",
@@ -478,54 +620,43 @@ def run_chatgpt(prompt, model, timeout, workdir, borrowed, schema=None):
                 "error": "`chatgpt-ask` not found — link chatgpt-bridge/chatgpt_ask.py "
                          "into PATH (see chatgpt-bridge/README.md)"}
 
-    if schema:
-        # "matching this schema" reads to the app as "fill this template in", and it
-        # answers by echoing the schema with the reply buried in a `description`.
-        # Asking for an instance explicitly is what stops that.
-        prompt = (f"{prompt}\n\nRespond with ONLY a JSON object that CONFORMS to this JSON "
-                  f"Schema. Return an instance of it, not the schema itself:\n{schema[1]}\n\n"
-                  f"Emit raw JSON: no code fence, and no backslash-escaping of Markdown "
-                  f"punctuation such as underscores.")
+    want = json.loads(schema[1]) if schema else None
+    ask = prompt if not schema else f"{prompt}\n\n" + SCHEMA_ASK.format(schema=schema[1])
 
-    promptdir = tempfile.mkdtemp(prefix="council-chatgpt-")
-    promptfile = os.path.join(promptdir, "question.txt")
-    try:
-        with open(promptfile, "w", encoding="utf-8") as fh:
-            fh.write(prompt)
-        cmd = bridge + ["--prompt-file", promptfile, "--json", "--timeout", str(timeout)]
-        t0 = time.time()
-        # +60: the script may have to relaunch the app before it can ask, and
-        # a cold start costs about 15s on top of the model's own timeout.
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 60,
-                              stdin=subprocess.DEVNULL)
-        elapsed = round(time.time() - t0, 1)
-    finally:
-        shutil.rmtree(promptdir, ignore_errors=True)
+    # `timeout` is the budget for the member, not for one attempt, so the retry spends
+    # what the first attempt left rather than doubling what the caller asked for.
+    deadline = time.time() + timeout
+    attempts, errs, conformed = [], [], False
+    for n in range(SCHEMA_RETRIES + 1):
+        budget = int(deadline - time.time())
+        if n and budget < MIN_RETRY_BUDGET:
+            errs = errs + ["no time left in --timeout for another attempt"]
+            break
+        raw, ok, elapsed, err = chatgpt_once(bridge, ask, max(budget, MIN_RETRY_BUDGET))
+        answer, structured = chatgpt_parse(raw, schema)
+        attempts.append({"ok": ok and bool(answer), "answer": answer, "structured": structured,
+                         "model": model or "desktop app", "elapsed_s": elapsed, "error": err})
+        if want is None or not attempts[-1]["ok"]:
+            break
+        errs = (schema_errors(structured, want) if structured is not None
+                else ["the reply was not a JSON object"])
+        if not errs:
+            conformed = True
+            break
+        ask = chatgpt_retry_prompt(prompt, schema, raw, errs)
 
-    try:
-        result = json.loads(proc.stdout)
-    except (TypeError, ValueError):
-        err = (proc.stderr or "").strip()[-600:] or f"exit {proc.returncode}, unreadable output"
-        return {"ok": False, "answer": "", "structured": None, "model": "desktop app",
-                "elapsed_s": elapsed, "error": err}
-
-    raw = unfence(result.get("answer", ""))
-    answer, structured = parse_structured(raw)
-    if schema and structured is None:
-        # Asked for JSON, got JSON-shaped prose: the app writes answers as
-        # Markdown, so it escapes punctuation ("COUNCIL\_UV\_OK") and `\_` is
-        # not a defined JSON escape. Drop backslashes before characters JSON
-        # gives no meaning to, keeping the seven real escapes intact.
-        answer, structured = parse_structured(re.sub(r'\\([^"\\/bfnrtu])', r"\1", raw))
-    if isinstance(structured, dict) and "properties" in structured and \
-            structured.get("type") == "object":
-        # It echoed the schema back instead of instantiating it. Treat that as
-        # unstructured rather than letting a schema document travel downstream
-        # as if it were an answer.
-        structured = None
-    return {"ok": bool(result.get("ok")) and bool(answer), "answer": answer,
-            "structured": structured, "model": model or "desktop app",
-            "elapsed_s": result.get("elapsed_s", elapsed), "error": result.get("error", "")}
+    if conformed or want is None or not attempts[-1]["ok"]:
+        res = attempts[-1]
+    else:
+        # Nothing conformed. Keep the FIRST attempt's prose: the retry's prompt was half
+        # schema correction, so its answer is the more polluted of the two. Drop
+        # `structured` so nothing downstream does arithmetic on a shape never met.
+        res = attempts[0]
+        res["structured"] = None
+        res["schema_error"] = (f"schema not met in {len(attempts)} attempt(s): "
+                               + "; ".join(errs[:4]))
+    res["elapsed_s"] = round(sum(a["elapsed_s"] for a in attempts), 1)
+    return res
 
 
 RUNNERS = {"codex": run_codex, "gemini": run_gemini, "claude": run_claude,
@@ -536,18 +667,14 @@ CLI_BIN = {"codex": "codex", "gemini": "agy", "claude": "claude",
            "opencode": "opencode", "chatgpt": "chatgpt-ask"}
 
 
-def resolve_members(members, borrowed, strict_schema):
-    """Hand the GPT seat back to `codex` for the runs the ChatGPT app cannot serve.
+def resolve_members(members, borrowed):
+    """Hand the GPT seat back to `codex` when the run needs a filesystem.
 
-    The app buys its cheaper meter with two gaps the CLI does not have: it has no
-    filesystem, so a borrowed --workdir is invisible to it, and there is no
-    `--output-schema` in a GUI, so a schema is a request it is free to decline. Either
-    one turns it from a cheaper member into a member answering a different question.
-
-    The default answer schema does not count as strict. It is rendered back to prose
-    either way and `parse_structured` accepts a member that ignored it, so asking is
-    enough. A caller who names its own schema is reading `structured` downstream and
-    needs the contract kept — that one counts.
+    A borrowed --workdir is the one thing the desktop app cannot substitute for: it
+    answers from inside a GUI, so it would be answering about a repo it never saw. A
+    schema is no longer a reason to swap — run_chatgpt validates the reply against it and
+    re-asks (see `schema_errors`), which is weaker than the CLIs' constrained decoding but
+    close enough not to be worth a member's quota.
 
     Only the DEFAULT roster is rewritten. An explicit --members is the caller's decision
     and is left exactly as given; `chatgpt` then refuses --workdir on its own rather than
@@ -555,16 +682,10 @@ def resolve_members(members, borrowed, strict_schema):
 
     Returns (members, reason) — reason is "" when nothing was swapped.
     """
-    if "chatgpt" not in members or "codex" in members:
-        return members, ""
-    if borrowed:
-        need = "--workdir, and the desktop app has no filesystem"
-    elif strict_schema:
-        need = "an enforced --output-schema, which a GUI cannot promise"
-    else:
+    if not borrowed or "chatgpt" not in members or "codex" in members:
         return members, ""
     return ([("codex" if m == "chatgpt" else m) for m in members],
-            f"chatgpt -> codex: this run needs {need}")
+            "chatgpt -> codex: this run needs --workdir, and the desktop app has no filesystem")
 
 
 def dispatch(name, prompt, model, timeout, workdir, borrowed, schema=None):
@@ -883,9 +1004,8 @@ def main():
                     help=f"comma-separated subset of: {', '.join(RUNNERS)} "
                          f"(default: {DEFAULT_MEMBERS}). The default roster answers through the "
                          "ChatGPT desktop app rather than `codex`, to spend the conversation "
-                         "allowance instead of Codex quota; --workdir or an explicit "
-                         "--output-schema hands that seat back to codex. A roster given here is "
-                         "used exactly as written")
+                         "allowance instead of Codex quota; --workdir hands that seat back to "
+                         "codex. A roster given here is used exactly as written")
     ap.add_argument("--prompt", help="prompt text (else --prompt-file, else stdin)")
     ap.add_argument("--prompt-file", help="file containing the prompt")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="per-member timeout in seconds")
@@ -979,9 +1099,7 @@ def main():
         workdir = tempfile.mkdtemp(prefix="llm-council-")
 
     if args.members is None:
-        strict_schema = schema is not None and \
-            os.path.realpath(args.output_schema) != os.path.realpath(DEFAULT_SCHEMA)
-        members, swapped = resolve_members(members, borrowed, strict_schema)
+        members, swapped = resolve_members(members, borrowed)
         if swapped:  # stdout is the answer payload; this belongs on stderr
             print(f"council.py: {swapped}", file=sys.stderr)
 
