@@ -23,8 +23,17 @@ if the code happens to be fine.
 | Worker | Reached via | Write mode | Auth (subscription / sign-in, not API key) |
 |---|---|---|---|
 | **codex** | `codex exec` | `-s workspace-write` sandbox (no network) | ChatGPT subscription (`auth_mode: chatgpt`) |
-| **gemini** | Antigravity `agy -p` | `--dangerously-skip-permissions` | Google Antigravity sign-in |
-| **opencode** | `opencode run` | `--dangerously-skip-permissions` | opencode sign-in — default DeepSeek V4 Flash (free) |
+| **gemini** | Antigravity `agy -p` | `--dangerously-skip-permissions` | Google Antigravity sign-in — default Gemini 3.8 Flash (High) |
+| **opencode** | `opencode run` (cwd = task dir) | `--auto` | opencode sign-in — DeepSeek V4.1 Flash Free, then MiMo-V2.6-Flash Free |
+
+**opencode falls back on its own.** If a free slug can't serve the task (withdrawn,
+free quota spent, 5xx), `dispatch.py` tries the next one, then reruns the task on
+**agy / Gemini 3.8 Flash (High)**. A timeout does not fall back. The result's
+`worker`/`model` name whoever finished, and `attempts` lists every try — so check
+it before reporting who did the work. Pin `"model"` to try only that slug before
+agy; `"fallback": false` (or `--no-fallback`) disables the chain. Free slugs come
+and go: `opencode models | grep free` lists the live ones, and
+`OPENCODE_FREE_MODELS` in `dispatch.py` is where to update them.
 
 Claude-side work does **not** go through this skill — use the native Agent tool for
 that. Dispatch is specifically for putting *other* models to work. The CLIs are
@@ -105,7 +114,9 @@ fails, fix or re-dispatch — never "merge anyway":
    command output doesn't count).
 3. **Failures surfaced** — a worker with `ok: false` (CLI missing, timeout) or
    poor output means you do that task yourself or re-dispatch with a sharpened
-   brief; say so explicitly, don't hide it.
+   brief; say so explicitly, don't hide it. An opencode task with more than one
+   entry in `attempts` fell back — a failed attempt may have left partial edits
+   that the next worker built on, so review the diff as a whole.
 
 ### 5. Merge and clean up
 
@@ -134,8 +145,10 @@ that task as `ok: false` and the rest proceed.
 - **`codex`** — signed into a ChatGPT subscription (`codex login`). Its sandbox has
   **no network**: tasks needing `npm install` etc. should go to another worker, or
   pre-install deps yourself first.
-- **`agy`** (Antigravity CLI) — signed in for Gemini models.
-- **`opencode`** — signed in (`opencode auth`); default DeepSeek model is free.
+- **`agy`** (Antigravity CLI) — signed in for Gemini models; `agy models` lists the
+  live model names (`DEFAULT_GEMINI_MODEL` must be one of them).
+- **`opencode`** — v2+, signed in (`opencode auth`); the free slugs need no
+  subscription. v2 removed `--dir` and `--dangerously-skip-permissions`.
 - **`python3`** (stdlib only) and **`git`** (for worktrees / change summaries).
 
 ## Rules

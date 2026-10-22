@@ -10,7 +10,8 @@ Each member authenticates through its own *subscription / sign-in*, not an API k
   - gemini    -> Google Antigravity CLI `agy`, Gemini models (`agy -p`)
   - claude    -> Claude Code headless (`claude -p`) — Claude as an independent member,
                  separate from the orchestrating session that chairs the council
-  - opencode  -> opencode CLI on free DeepSeek, so it costs no subscription quota
+  - opencode  -> opencode CLI on a free slug (DeepSeek V4.1 Flash), so it costs no
+                 subscription quota
                  (off the default roster — see DEFAULT_MEMBERS)
   - chatgpt   -> the ChatGPT desktop app via `chatgpt-ask` — spends the conversation
                  allowance rather than Codex quota, which is why it, and not codex,
@@ -63,16 +64,17 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_TIMEOUT = 300  # seconds, per member — matches agy's default --print-timeout
-DEFAULT_GEMINI_MODEL = "Gemini 3.1 Pro (High)"
+DEFAULT_GEMINI_MODEL = "Gemini 3.8 Flash (High)"  # `agy models` lists the live names
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"  # pinned: the reviewer roster names it explicitly.
 # Verified to be accepted under ChatGPT auth — the HTTP 400 documented in SKILL.md is
 # specific to the `gpt-5-codex` slug, not to pinning a model. `model_reasoning_effort`
 # is still inherited from ~/.codex/config.toml and is NOT pinned here.
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"  # pinned: the reviewer roster names it explicitly
-# A free slug on opencode's own provider. These come and go: the previous default
-# (opencode/deepseek-v4-flash-free) was withdrawn and every call returned a server
-# error. `opencode models | grep free` lists what is currently live.
-DEFAULT_OPENCODE_MODEL = "opencode/mimo-v2.5-free"
+# A free slug on opencode's own provider. These come and go: the previous defaults
+# (opencode/deepseek-v4-flash-free, then opencode/mimo-v2.5-free) were withdrawn and
+# every call returned a server error. `opencode models | grep free` lists what is
+# currently live; opencode/mimo-v2.6-flash-free is the other live alternative.
+DEFAULT_OPENCODE_MODEL = "opencode/deepseek-v4.1-flash-free"
 
 # Who answers when --members is not given.
 #
@@ -440,8 +442,9 @@ def run_claude(prompt, model, timeout, workdir, borrowed, schema=None):
 def run_opencode(prompt, model, timeout, workdir, borrowed, schema=None):
     """opencode `run` in JSON mode; the answer is the concatenation of `type:text` events.
 
-    Free DeepSeek by default, so this member costs no subscription quota — which is why
-    it is in the default set rather than opt-in.
+    A free slug by default, so this member costs no subscription quota. It stays off the
+    default roster anyway (see DEFAULT_MEMBERS). Provider failures (quota, 5xx, withdrawn
+    slug) arrive as `type:error` events on stdout, so they are surfaced from there.
 
     It is refused on a borrowed workdir. The other members each have something real
     behind their read-only promise (an OS sandbox, denied tools, plan mode); opencode
@@ -471,7 +474,7 @@ def run_opencode(prompt, model, timeout, workdir, borrowed, schema=None):
                           stdin=subprocess.DEVNULL)
     elapsed = round(time.time() - t0, 1)
 
-    texts = []
+    texts, errors = [], []
     for line in (proc.stdout or "").splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -484,10 +487,14 @@ def run_opencode(prompt, model, timeout, workdir, borrowed, schema=None):
             chunk = (obj.get("part") or {}).get("text")
             if chunk:
                 texts.append(chunk)
+        elif obj.get("type") == "error":
+            e = obj.get("error") or {}
+            errors.append(f"{e.get('type', 'error')}: {e.get('message', '')}".strip())
 
     answer, structured = parse_structured(unfence("\n".join(texts)))
-    ok = bool(answer) and proc.returncode == 0
-    err = "" if ok else ((proc.stderr or "").strip()[-600:] or f"exit {proc.returncode}, empty answer")
+    ok = bool(answer) and proc.returncode == 0 and not errors
+    err = "" if ok else ("; ".join(errors) or (proc.stderr or "").strip()[-600:]
+                         or f"exit {proc.returncode}, empty answer")
     return {"ok": ok, "answer": answer, "structured": structured,
             "model": model or DEFAULT_OPENCODE_MODEL, "elapsed_s": elapsed, "error": err}
 

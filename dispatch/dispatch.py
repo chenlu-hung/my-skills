@@ -14,7 +14,13 @@ Adapted from llm-council/council.py, with three deliberate differences:
 Workers authenticate through their own subscription / sign-in, not API keys:
   - codex     -> Codex CLI `codex exec -s workspace-write` (ChatGPT subscription)
   - gemini    -> Antigravity CLI `agy --dangerously-skip-permissions -p`
-  - opencode  -> opencode CLI `opencode run --dangerously-skip-permissions`
+  - opencode  -> opencode CLI `opencode run --auto` (cwd = task dir; v2 has no --dir)
+
+opencode falls back when it can't serve the task (model withdrawn, free quota
+spent, 5xx): each free slug in OPENCODE_FREE_MODELS in turn, then agy on
+OPENCODE_FALLBACK_GEMINI_MODEL. A timeout does not fall back — it already spent
+the task's budget. Pinning "model" on the task tries only that slug before agy;
+"fallback": false (or --no-fallback) turns the chain off.
 
 Usage:
     python3 dispatch.py --worker codex --prompt-file brief.txt --dir .
@@ -24,12 +30,15 @@ Usage:
 tasks.json — a list of task objects:
     [{"id": "auth-fix", "worker": "codex", "task_file": "brief1.txt",
       "dir": ".", "worktree": true, "model": "", "timeout": 900, "extra_args": []},
-     {"id": "docs", "worker": "opencode", "task": "...", "dir": "."}]
+     {"id": "docs", "worker": "opencode", "task": "...", "dir": ".", "fallback": true}]
 
 Output: JSON on stdout:
     {"tasks": {"auth-fix": {ok, worker, report, model, elapsed_s, error,
-                            dir, branch, git: {changed_files, shortstat}}}}
+                            dir, branch, git: {changed_files, shortstat},
+                            attempts: [{worker, model, ok, error, elapsed_s}]}}}
 
+`worker`/`model` name whoever produced the final result — after a fallback that
+is not the worker the task asked for, and `attempts` lists every try in order.
 `report` is the worker's final message; `git` summarizes what it actually
 changed in its dir, so the orchestrator can review before merging. Worktrees
 are NOT removed by this script — review, merge, then `git worktree remove`.
@@ -46,9 +55,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_TIMEOUT = 900  # seconds per task — work takes longer than Q&A
-DEFAULT_GEMINI_MODEL = "Gemini 3.1 Pro (High)"
+DEFAULT_GEMINI_MODEL = "Gemini 3.8 Flash (High)"  # `agy models` lists the live names
 DEFAULT_CODEX_MODEL = ""  # empty = whatever the ChatGPT subscription defaults to
-DEFAULT_OPENCODE_MODEL = "opencode/deepseek-v4-flash-free"  # free DeepSeek V4 Flash
+# Free slugs on opencode's own provider, tried in order. They come and go (the old
+# opencode/deepseek-v4-flash-free was withdrawn); `opencode models | grep free` lists
+# what is currently live.
+OPENCODE_FREE_MODELS = ("opencode/deepseek-v4.1-flash-free", "opencode/mimo-v2.6-flash-free")
+DEFAULT_OPENCODE_MODEL = OPENCODE_FREE_MODELS[0]
+OPENCODE_FALLBACK_GEMINI_MODEL = "Gemini 3.8 Flash (High)"  # agy, when no opencode slug works
 WORKERS = ("codex", "gemini", "opencode")
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")  # strip terminal color codes from CLI stdout
@@ -99,18 +113,19 @@ def run_gemini(t):
 
 
 def run_opencode(t):
-    """opencode `run` in JSON mode with permissions auto-approved; the report is
-    the concatenation of `type:text` events."""
-    cmd = ["opencode", "run", "--format", "json",
-           "--dangerously-skip-permissions", "--dir", t["dir"]]
+    """opencode `run` in JSON mode with permissions auto-approved (`--auto`); the
+    report is the concatenation of `type:text` events. opencode v2 dropped `--dir`
+    and `--dangerously-skip-permissions`, so cwd is what confines it to the task dir.
+    Provider failures (quota, 5xx) arrive as `type:error` events on stdout, not stderr."""
+    cmd = ["opencode", "run", "--format", "json", "--auto"]
     if t["model"]:
         cmd += ["-m", t["model"]]
     cmd += t["extra_args"] + [t["prompt"]]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          timeout=t["timeout"], cwd=t["dir"])
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=t["timeout"],
+                          cwd=t["dir"], stdin=subprocess.DEVNULL)
 
-    texts = []
+    texts, errors = [], []
     for line in (proc.stdout or "").splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -123,9 +138,13 @@ def run_opencode(t):
             chunk = (obj.get("part") or {}).get("text")
             if chunk:
                 texts.append(chunk)
+        elif obj.get("type") == "error":
+            e = obj.get("error") or {}
+            errors.append(f"{e.get('type', 'error')}: {e.get('message', '')}".strip())
     report = "\n".join(texts).strip()
-    ok = bool(report) and proc.returncode == 0
-    err = "" if ok else ((proc.stderr or "").strip()[-600:] or f"exit {proc.returncode}, empty report")
+    ok = bool(report) and proc.returncode == 0 and not errors
+    err = "" if ok else ("; ".join(errors) or ANSI.sub("", proc.stderr or "").strip()[-600:]
+                         or f"exit {proc.returncode}, empty report")
     return ok, report, err
 
 
@@ -172,22 +191,46 @@ def git_summary(workdir):
             "shortstat": shortstat}
 
 
+def attempt_chain(t):
+    """(worker, model) pairs to try in order. Only opencode has a chain: its free
+    slugs (or just the pinned one), then agy on Gemini."""
+    if t["worker"] != "opencode" or not t["fallback"]:
+        return [(t["worker"], t["model"])]
+    slugs = [t["model"]] if t["model_pinned"] else list(OPENCODE_FREE_MODELS)
+    return [("opencode", m) for m in slugs] + [("gemini", OPENCODE_FALLBACK_GEMINI_MODEL)]
+
+
+def run_attempt(t, worker, model):
+    """One CLI run; a missing CLI / timeout / crash becomes a structured error.
+    Returns (ok, report, err, timed_out)."""
+    try:
+        ok, report, err = RUNNERS[worker](dict(t, worker=worker, model=model))
+        return ok, report, err, False
+    except subprocess.TimeoutExpired:
+        return False, "", f"timed out after {t['timeout']}s", True
+    except FileNotFoundError:
+        return False, "", (f"`{CLI_BIN[worker]}` not found on PATH — "
+                           "is the CLI installed and signed in?"), False
+    except Exception as exc:  # noqa: BLE001 — surface anything else as a task error
+        return False, "", f"{type(exc).__name__}: {exc}", False
+
+
 def dispatch(t):
-    """Run one task; a missing CLI / timeout / crash becomes a structured error."""
+    """Run one task down its attempt chain until one succeeds. A timeout stops the
+    chain: the task already used its budget, and retrying would double it."""
     result = {"ok": False, "worker": t["worker"], "report": "",
               "model": t["model"] or "default", "elapsed_s": 0,
-              "error": "", "dir": t["dir"], "branch": t.get("branch", ""), "git": None}
+              "error": "", "dir": t["dir"], "branch": t.get("branch", ""), "git": None,
+              "attempts": []}
     t0 = time.time()
-    try:
-        ok, report, err = RUNNERS[t["worker"]](t)
-        result.update(ok=ok, report=report, error=err)
-    except subprocess.TimeoutExpired:
-        result["error"] = f"timed out after {t['timeout']}s"
-    except FileNotFoundError:
-        result["error"] = (f"`{CLI_BIN[t['worker']]}` not found on PATH — "
-                           "is the CLI installed and signed in?")
-    except Exception as exc:  # noqa: BLE001 — surface anything else as a task error
-        result["error"] = f"{type(exc).__name__}: {exc}"
+    for worker, model in attempt_chain(t):
+        a0 = time.time()
+        ok, report, err, timed_out = run_attempt(t, worker, model)
+        result["attempts"].append({"worker": worker, "model": model or "default", "ok": ok,
+                                   "error": err, "elapsed_s": round(time.time() - a0, 1)})
+        result.update(ok=ok, worker=worker, model=model or "default", report=report, error=err)
+        if ok or timed_out:
+            break
     result["elapsed_s"] = round(time.time() - t0, 1)
     result["git"] = git_summary(t["dir"])
     return result
@@ -205,6 +248,9 @@ def load_tasks(args):
         raw = [{"id": args.id, "worker": args.worker, "task": args.prompt,
                 "task_file": args.prompt_file, "dir": args.dir,
                 "worktree": args.worktree, "model": args.model}]
+    if args.no_fallback:
+        for r in raw:
+            r["fallback"] = False
 
     tasks, seen = [], set()
     for i, r in enumerate(raw, 1):
@@ -227,6 +273,8 @@ def load_tasks(args):
             "dir": os.path.abspath(r.get("dir") or os.getcwd()),
             "worktree": bool(r.get("worktree")),
             "model": DEFAULT_MODELS[worker] if model is None else model,
+            "model_pinned": model is not None,
+            "fallback": r.get("fallback", True) is not False,
             "timeout": int(r.get("timeout") or args.timeout),
             "extra_args": list(r.get("extra_args") or []),
         })
@@ -246,6 +294,8 @@ def main():
     ap.add_argument("--id", default=None, help="single-task mode: task id (default: <worker>-1)")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help=f"default per-task timeout in seconds (default: {DEFAULT_TIMEOUT})")
+    ap.add_argument("--no-fallback", action="store_true",
+                    help="opencode tasks: fail instead of trying the next free slug, then agy")
     args = ap.parse_args()
 
     tasks = load_tasks(args)
@@ -259,7 +309,8 @@ def main():
             except RuntimeError as exc:
                 results[t["id"]] = {"ok": False, "worker": t["worker"], "report": "",
                                     "model": t["model"] or "default", "elapsed_s": 0,
-                                    "error": str(exc), "dir": t["dir"], "branch": "", "git": None}
+                                    "error": str(exc), "dir": t["dir"], "branch": "", "git": None,
+                                    "attempts": []}
                 continue
         runnable.append(t)
 
