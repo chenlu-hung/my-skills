@@ -56,7 +56,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_TIMEOUT = 900  # seconds per task — work takes longer than Q&A
 DEFAULT_GEMINI_MODEL = "Gemini 3.8 Flash (High)"  # `agy models` lists the live names
-DEFAULT_CODEX_MODEL = ""  # empty = whatever the ChatGPT subscription defaults to
+DEFAULT_CODEX_MODEL = "gpt-6.1-sol"  # pinned; "" = whatever the ChatGPT subscription defaults to
 # Free slugs on opencode's own provider, tried in order. They come and go (the old
 # opencode/deepseek-v4-flash-free was withdrawn); `opencode models | grep free` lists
 # what is currently live.

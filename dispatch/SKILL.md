@@ -22,7 +22,7 @@ if the code happens to be fine.
 
 | Worker | Reached via | Write mode | Auth (subscription / sign-in, not API key) |
 |---|---|---|---|
-| **codex** | `codex exec` | `-s workspace-write` sandbox (no network) | ChatGPT subscription (`auth_mode: chatgpt`) |
+| **codex** | `codex exec` | `-s workspace-write` sandbox (no network) | ChatGPT subscription (`auth_mode: chatgpt`) — default GPT-6.1 Sol |
 | **gemini** | Antigravity `agy -p` | `--dangerously-skip-permissions` | Google Antigravity sign-in — default Gemini 3.8 Flash (High) |
 | **opencode** | `opencode run` (cwd = task dir) | `--auto` | opencode sign-in — DeepSeek V4.1 Flash Free, then MiMo-V2.6-Flash Free |
 
