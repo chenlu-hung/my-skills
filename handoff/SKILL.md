@@ -1,174 +1,70 @@
 ---
 name: handoff
-description: Manages context transfer between AI coding sessions. Creates a compact handoff document so a fresh agent can continue work. Use when user says "handoff", "hand off", "resume", "continue later", "pick up where we left off", "transfer context", or when wrapping up a significant session.
-argument-hint: "What will the next session be used for?"
+description: Saves session state to a per-project handoff file so a fresh agent can continue the work, and resumes from it. Use when the user says "handoff", "hand off", "resume", "continue later", "pick up where we left off", "transfer context", "交班", "交接", "接手", "下次繼續", or when wrapping up a significant session.
+argument-hint: "[quick|resume] [what the next session is for]"
 ---
 
 # Handoff
 
-Transfer context to a fresh session via a compact handoff file. Invoke this skill when the user wants to pause, resume, or pass work to another session.
+The reader is a fresh agent that never saw this conversation. Make every line stand alone: name files, `file:line`, commands, shas. Never write "the bug", "that approach", "as discussed".
 
-## Modes
-
-| Invocation | What it does |
+| Invocation | Does |
 |---|---|
-| `/handoff` | Full handoff — context, decisions, dead ends, next steps |
-| `/handoff quick` | Minimal — one-line goal, suggested skills, 3-5 next steps |
-| `/handoff resume` | Continue from an existing handoff file |
+| `/handoff [focus]` | Full handoff; `focus` steers `Next` and `Skills` |
+| `/handoff quick` | Goal, `Skills` and 3-5 `Next` items only |
+| `/handoff resume` | Resume steps below |
 
-If arguments describe the next session's focus, tailor "Next Steps" and "Suggested skills" to it.
+## Create
 
-## Where handoffs live
+1. Write the draft to a scratch file from the template. Bullets only, ≤5 per section, drop empty sections. Point to commits, diffs, docs and `.projectmap/` instead of pasting them. No secrets or personal data.
+2. File it; never pick the destination yourself:
+   ```sh
+   bash ~/.claude/skills/handoff/handoff-path.sh --commit <draft>
+   ```
+   It scans for secrets, appends a git snapshot (branch, HEAD, uncommitted files), files the handoff, prints its path and deletes the draft. Exit 3 means a possible secret, nothing written, masked lines listed: remove `secret` lines; for `likely` lines, remove the value if real, else rephrase. Re-run.
+3. Tell the user the printed path.
 
-Handoffs are **scoped per project**, so several projects can each carry their own without colliding. Write the draft to a scratch file, then hand it to the helper — never compose a destination path yourself:
-
-```sh
-bash ~/.claude/skills/handoff/handoff-path.sh --commit <draft>
-```
-
-`--commit` scans the draft for secrets, and only if it comes back clean does it file the draft as this project's newest handoff, print the resulting path, and delete the draft. Files land at `~/.claude/handoff/<project>-<hash>/claude-handoff-<YYYY-MM-DD-HHMM>.md`, pruned to the newest 5.
-
-- The project is `$CLAUDE_PROJECT_DIR`, falling back to the session's cwd. A git worktree is its own project.
-- No argument prints the directory; `--latest` prints the newest existing handoff; `--keep <n>` changes retention; `--scan <file>` reports secrets without writing anything.
-- `--new` prints an unscanned destination path. It is an escape hatch, not the normal route — a handoff written that way never passes the gate.
-- Keep the `claude-handoff-` prefix; the SessionStart hook globs for it.
-- Handoffs never go in the OS temp dir — macOS clears `$TMPDIR` after ~3 days, so one you came back to next week would already be gone.
-
-### Seeing handoffs inside the project
-
-`handoff-path.sh --link` adds `<project>/.claude/handoff` as a symlink to that project's directory, so handoffs appear in the tree and open from the editor. The files themselves stay in `$HOME`, which is what makes this safe:
-
-- `git clean -xdf` can only remove the symlink. The handoffs survive, and the next SessionStart hook silently restores the link.
-- A stray commit would capture a path string, not the handoff contents.
-
-`--link` writes `/.claude/handoff` to `.git/info/exclude` — local to the clone, absent from anyone's diff, shared by every worktree — and then **verifies** with `git check-ignore` before keeping the symlink. A negation pattern such as `!.claude/**` in a `.gitignore` would otherwise leave it exposed, so on a failed check it removes the link and changes nothing. It also refuses to replace a real file or directory already sitting at that path.
-
-`--link-status` reports the current state. `--unlink` removes the symlink and leaves every handoff untouched.
-
-While a project is linked, `--commit` and `--latest` report the in-tree path — the file itself still lands in the real directory.
-
-### Handoffs from before scoping
-
-Older handoffs still sit unscoped in the OS temp dir. The hook reports their count when the current project has none of its own; file one with `mv <file> "$(bash ~/.claude/skills/handoff/handoff-path.sh --dir <project>)"/` once you know which project it belongs to.
-
-## Creating a Handoff
-
-Run the **Project map check** (below) first. If the map is missing or stale, **don't build it now** — you're wrapping up and it costs tokens. Instead record it as a Next Step (e.g. `[P1] Run /project-map update (map stale)`) so the resuming session does it with fresh budget.
-
-### Full document
+Template:
 
 ```markdown
-<!-- HIGHLY SENSITIVE. Do not share this file. -->
-# Handoff — [One-line Goal]
+# Handoff — <one-line goal>
+Skills: <skills the next session should load>
 
-> **Suggested skills**: [skill-1], [skill-2], ...
-
-## What We're Building
-[1-3 bullets max. Reference artifacts by path/URL — do not duplicate. If `.projectmap/` exists, link `.projectmap/ARCHITECTURE.md` instead of re-describing structure.]
+## Context
+- <what and why, 1-3 bullets; link the PRD / issue / `.projectmap/ARCHITECTURE.md` instead of re-describing>
 
 ## Progress
-- [x] Done item
-- [ ] In-progress item (blocked by X)
+- [x] <done> (`<sha>`)
+- [ ] <in progress> — stopped at <file:line, exact state>
+- Verify: `<test/build command>` → <result now>
 
-## What Worked / Avoid
-- ✓ Approach A worked
-- ✗ Approach B failed — reason (don't retry)
+## Next
+1. [P0] <first concrete action>
+2. [P1] …
 
-## Key Decisions
-- Chose X over Y because ...
+## Decisions & constraints
+- <chose X over Y because …>
+- <user requirement: always/never …>
 
-## References
-- Codebase map (if present): `.projectmap/ARCHITECTURE.md`, `.projectmap/modules/<name>.md`
-- Docs: `docs/prd.md`, `docs/adr/001-choice.md`
-- Commits: `abc1234`, `def5678`
+## Worked / avoid
+- ✓ <non-obvious thing that worked>
+- ✗ <tried X; failed because Y — don't retry>
 
-## Next Steps
-1. [P0] Critical action item
-2. [P1] Important follow-up
-3. [P2] Nice to have
+## Open questions
+- <undecided: ask the user, don't decide>
 ```
 
-**Keep it lean** — the next session reads this back, so every line costs tokens twice (to write, then to re-read):
-- Bullets only, no prose. Hard cap ~5 bullets per section; delete any section that would be empty.
-- Pointers over content: link commits, diffs, `.projectmap/`, PRDs — never paste their contents.
+## Resume
 
-**Quick mode**: keep only the goal, suggested skills, and 3-5 next steps.
+1. Run `bash ~/.claude/skills/handoff/handoff-path.sh --resume`. It prints the newest handoff's path (no output: none for this project), what changed since it was filed, and the project-map state. It also stops the start-up hook from offering that handoff again.
+2. Read the handoff and load the skills on its `Skills:` line.
+3. If HEAD or the uncommitted files differ from its Snapshot, tell the user before acting on it.
+4. On `project-map: stale` or `missing`, offer `/project-map update` or `build` (costs tokens; ask first). Then orient from `.projectmap/` (ARCHITECTURE.md, grep `tags`), not by scanning the repo.
+5. Summarize goal and state for the user in ≤3 lines, then start the top `Next` item.
+6. Leave the old handoff as it is. At wrap-up, file a new one; it supersedes.
 
-### Saving
+## More
 
-Write the draft to a scratch path, then file it:
-
-```sh
-bash ~/.claude/skills/handoff/handoff-path.sh --commit <draft>
-```
-
-The draft is transient, so a scratch path is fine for it — it is consumed and removed. Only the filed handoff needs to survive, which is why it goes to `$HOME` rather than the temp dir.
-
-The gate runs inside `--commit` rather than as a step you remember, because a handoff gets written exactly when context is running out and a checklist is easiest to skip. On a hit it prints the offending lines with the values masked, exits 3, and writes nothing:
-
-- `secret` — a credential identified by shape (`sk-ant-…`, `AKIA…`, a private-key header, credentials inside a URL). Treat it as real.
-- `likely` — a credential-ish name assigned a value long enough to be one. Read the line before deciding; prose about tokens and passwords does not trigger this, an assignment does.
-
-Redact the draft and re-run. The scan never edits the draft itself: quietly rewriting a value would hand the next session an altered document, which is harder to notice than a refusal. If the draft is missing the sensitivity header, `--commit` prepends it and says so.
-
-One check the gate cannot make for you: no section exceeds ~5 bullets, and no artifact content is pasted in — pointers only.
-
-## Resume Flow
-
-Triggered when the user confirms a resume — either after the SessionStart hook reports a handoff (it only ever reports one belonging to the current project), or via `/handoff resume`:
-
-1. Read the handoff file — the hook names it, or `handoff-path.sh --latest` finds it.
-2. Load any skills listed under "Suggested skills".
-3. Summarize state (goal + progress) for the user.
-4. Run the **Project map check** (below). If the map is missing or stale, this is the moment to build/update — offer it, and on confirmation follow the project-map skill's workflow before continuing. Then use the map to regain context: read `ARCHITECTURE.md`, grep `.projectmap/tags`, open only the source files the next step needs. Don't re-scan the repo.
-5. Start from the highest-priority "Next Steps" item.
-6. Append updates as work progresses (check off items, add new ones) — don't rewrite the whole file.
-
-## Project map check
-
-A committed `.projectmap/` lets the next session skip re-scanning the repo (see the project-map skill). Detect its state with this **read-only, no-LLM-token, no-write** command — run it both when creating and when resuming:
-
-```sh
-python3 ~/.claude/skills/project-map/build-map.py status .
-```
-
-Interpret the output:
-
-| Output contains | State | Action |
-|---|---|---|
-| `no source files found` | not a code repo | skip — project map is irrelevant |
-| `no manifest yet` | no map | **building costs tokens + needs `universal-ctags`** — never silent |
-| `Run /project-map update to refresh` | stale | incremental update (cheaper) |
-| `Map is up to date` | current | nothing to do |
-
-Then act by lifecycle moment — **detection is automatic; building/updating is not silent**:
-
-- **Resuming** (fresh budget, pays off this session): if stale/missing, offer to run `/project-map update` or `/project-map build`. On confirmation, follow the project-map skill's workflow, then continue the resume.
-- **Creating** (wrapping up — don't spend build tokens now): record the state as a Next Step instead, e.g. `[P1] Run /project-map update (map stale)` or `[P2] /project-map build — no map yet; would cut next session's exploration`.
-
-## Other harnesses
-
-The store and the scripts are shared, so a handoff written from one harness resumes in another. Install elsewhere by pointing at this directory rather than copying it — one copy of the scripts is what keeps the two installs from drifting:
-
-```sh
-ln -s ~/.claude/skills/handoff ~/.codex/skills/handoff
-```
-
-What differs is the trigger. Claude Code's SessionStart hook detects this project's newest handoff and offers a resume unprompted; nowhere else is there a session-start event to hang that on, so resuming is user-triggered — run `handoff-path.sh --latest` and follow the Resume Flow from step 1.
-
-Project resolution differs too, and it matters because the store directory is keyed on the project path. Claude Code publishes `$CLAUDE_PROJECT_DIR`; without it the scripts take the enclosing repo root, so a session started deep inside the tree still files its handoff where the next one looks. Set `HANDOFF_PROJECT_DIR` to pin the project explicitly when neither holds — outside a repo the fallback is the cwd, which is only right if that is where the session started.
-
-Filed handoffs keep the `claude-handoff-` prefix whichever harness wrote them; the hook globs for it.
-
-## Rules
-
-- **Redact** all secrets (API keys, passwords, tokens) and PII before writing.
-- File every handoff through `handoff-path.sh --commit`, so the secret scan cannot be skipped. The handoff itself never enters version control; the optional in-tree symlink is excluded and verified as such.
-- First line of every handoff: `<!-- HIGHLY SENSITIVE. Do not share this file. -->`
-- Reference existing artifacts (PRDs, ADRs, issues, commits, diffs, `.projectmap/`) by path/URL — never duplicate their content.
-
-## When to Suggest
-
-Proactively offer a handoff when the user says "I need to go" / "let's wrap up", at a milestone, or when the conversation has grown long and context-heavy:
-
-> "Want me to create a handoff so another session can pick this up?"
+- `handoff-path.sh` with no argument prints this project's handoff directory. `--latest`: newest path, read-only. `--scan <file>`: check without filing. `--keep <n>`: retention (default 5). `--link` / `--unlink` / `--link-status`: in-tree symlink `<project>/.claude/handoff`, git-excluded; only when the user asks.
+- Outside Claude Code there is no start-up hook, so resume only when asked. If the shell starts outside the project, set `HANDOFF_PROJECT_DIR`.
+- When the user wraps up or the context grows long, offer: "Want me to create a handoff so another session can pick this up?"
