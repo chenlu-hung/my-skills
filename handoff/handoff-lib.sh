@@ -17,34 +17,38 @@ handoff_root() {
   printf '%s' "${CLAUDE_HANDOFF_ROOT:-$HOME/.claude/handoff}"
 }
 
-# Resolve the project this session belongs to. Order:
-#   $HANDOFF_PROJECT_DIR -> $CLAUDE_PROJECT_DIR -> "cwd" from the hook's JSON
-#   payload on stdin -> the enclosing repo root -> $PWD
-#
-# The repo root matters for harnesses that publish no project-dir variable
-# (Codex, for one). The store directory is keyed on this path, so a session
-# started in a subdirectory would otherwise file its handoff somewhere the next
-# session never looks. $HANDOFF_PROJECT_DIR pins it when neither holds.
-# Everything except the hook's stdin payload. Callers invoked from an agent's
-# shell must use this one: stdin there is a pipe, not a tty, so the payload step
-# below would consume whatever happens to be on it.
-handoff_project_dir_local() {
-  local dir="${HANDOFF_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}"
-  [ -z "$dir" ] && dir="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"
-  [ -z "$dir" ] && dir="$PWD"
-  printf '%s' "$dir"
+# Fold a path to the project it belongs to: the enclosing repo root, else the
+# physical directory. The hook and the agent's shell start from different
+# places. The hook gets $CLAUDE_PROJECT_DIR, which is wherever Claude Code was
+# launched and can be a subdirectory or a symlinked path; the agent's shell has
+# no such variable and starts from $PWD. Unless both fold the same way they key
+# different stores, and the hook never sees what the agent filed.
+handoff_canon_dir() {
+  local dir="${1%/}" top
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)"
+  if [ -n "$top" ]; then printf '%s' "$top"; return 0; fi
+  (CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P) || printf '%s' "$dir"
 }
 
-# The full chain, for the SessionStart hook, which is handed JSON on stdin.
+# Resolve the project this session belongs to:
+#   $HANDOFF_PROJECT_DIR -> $CLAUDE_PROJECT_DIR -> $PWD, folded by handoff_canon_dir.
+# $HANDOFF_PROJECT_DIR pins it for a shell that starts outside the project.
+handoff_project_dir_local() {
+  handoff_canon_dir "${HANDOFF_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+}
+
+# The same chain for the SessionStart hook, with the "cwd" from its JSON
+# payload ($1) ahead of $PWD.
 handoff_project_dir() {
-  local dir="${HANDOFF_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}"
-  if [ -z "$dir" ] && [ ! -t 0 ]; then
-    dir="$(cat 2>/dev/null \
-      | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-      | head -n1)"
-  fi
-  [ -n "$dir" ] && { printf '%s' "$dir"; return 0; }
-  handoff_project_dir_local
+  handoff_canon_dir "${HANDOFF_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-${1:-$PWD}}}"
+}
+
+# A top-level string field from the hook's JSON payload. sed rather than jq so
+# the hook has no dependencies; the fields read here hold no escaped quotes.
+handoff_json_field() {
+  printf '%s' "$1" \
+    | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n1
 }
 
 handoff_slug() {
@@ -63,6 +67,11 @@ handoff_store() {
   local dir="${1:-}"
   [ -z "$dir" ] && dir="$(handoff_project_dir_local)"
   printf '%s/%s' "$(handoff_root)" "$(handoff_slug "$dir")"
+}
+
+# Newest handoff in a store, or nothing.
+handoff_latest() {
+  ls -t "$1"/claude-handoff-*.md 2>/dev/null | head -n1
 }
 
 # In-tree symlink path, and the marker recording that this project opted in.
@@ -114,6 +123,64 @@ handoff_repair_link() {
   mkdir -p "$store" "$(dirname "$link")" || return 3
   ln -sfn "$store" "$link" || return 3
   printf 'repaired'
+  return 0
+}
+
+# --- repo state ------------------------------------------------------------
+# Recorded by the script rather than asked of the writer: a handoff is written
+# when context is running out, and branch, HEAD and uncommitted work are what a
+# hurried writer leaves out and the next session needs first.
+
+# Uncommitted changes on one line: "none", or "<n>: M a.py, ?? b.md, …".
+handoff_dirty() {
+  local dir="$1" lines n
+  lines="$(git -C "$dir" status --porcelain 2>/dev/null)"
+  n="$(printf '%s' "$lines" | grep -c .)"
+  if [ "$n" -eq 0 ]; then printf 'none'; return 0; fi
+  printf '%s: %s' "$n" "$(printf '%s\n' "$lines" | head -n 15 | sed 's/^ *//' | paste -sd, - | sed 's/,/, /g')"
+  if [ "$n" -gt 15 ]; then printf ', … (+%s more)' "$((n - 15))"; fi
+}
+
+# Appended to every filed handoff. Git repos only; prints nothing elsewhere.
+handoff_snapshot() {
+  local dir="$1" head
+  git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  head="$(git -C "$dir" log -1 --format='%h %s' 2>/dev/null)"
+  printf '\n## Snapshot (auto)\n'
+  printf -- '- Branch: `%s`\n' "$(git -C "$dir" status -sb 2>/dev/null | head -n1 | sed 's/^## //')"
+  printf -- '- HEAD: `%s`\n' "${head:-no commits}"
+  printf -- '- Uncommitted: %s\n' "$(handoff_dirty "$dir")"
+}
+
+# How far the repo moved since a handoff's snapshot, for --resume.
+handoff_drift() {
+  local dir="$1" file="$2" sha now n
+  sha="$(sed -n 's/^- HEAD: `\([0-9a-f]\{7,\}\).*/\1/p' "$file" | head -n1)"
+  now="$(git -C "$dir" log -1 --format=%h 2>/dev/null)"
+  if [ -z "$sha" ] || [ -z "$now" ]; then return 0; fi
+  if [ "$(git -C "$dir" rev-parse "$sha" 2>/dev/null)" = "$(git -C "$dir" rev-parse HEAD)" ]; then
+    printf 'since handoff: HEAD unchanged (%s); uncommitted: %s\n' "$now" "$(handoff_dirty "$dir")"
+  elif n="$(git -C "$dir" rev-list --count "$sha..HEAD" 2>/dev/null)"; then
+    printf 'since handoff: HEAD %s -> %s (+%s commits); uncommitted: %s\n' "$sha" "$now" "$n" "$(handoff_dirty "$dir")"
+    if [ "$n" -gt 0 ]; then git -C "$dir" log --oneline -n 10 "$sha..HEAD"; fi
+  else
+    printf 'since handoff: HEAD %s is gone from this repo (now %s); uncommitted: %s\n' "$sha" "$now" "$(handoff_dirty "$dir")"
+  fi
+  return 0
+}
+
+# project-map's read-only status, reduced to one word, for --resume. Silent
+# when project-map isn't installed or the directory holds no source code.
+handoff_map_state() {
+  local bm="$HOME/.claude/skills/project-map/build-map.py" out
+  [ -f "$bm" ] || return 0
+  out="$(python3 "$bm" status "$1" 2>/dev/null)" || return 0
+  case "$out" in
+    *"no source files found"*) ;;
+    *"no manifest yet"*)       echo "project-map: missing" ;;
+    *"/project-map update"*)   echo "project-map: stale" ;;
+    *"up to date"*)            echo "project-map: current" ;;
+  esac
   return 0
 }
 
@@ -171,6 +238,12 @@ handoff_mask_line() {
          -e 's/[A-Za-z0-9_+/=-]{12,}/[MASKED]/g'
 }
 
+# A `likely` hit is an assignment, so mask its whole value: one shorter than
+# the 12-character runs above would otherwise print intact.
+handoff_mask_assignment() {
+  sed -E 's/^([0-9]+:[^:=]*[:=]).*/\1 [MASKED]/'
+}
+
 # Scan a file. Prints one `secret|likely <line>: <masked text>` per hit.
 #   0 clean   1 hits found   2 unreadable
 handoff_scan_secrets() {
@@ -193,7 +266,7 @@ handoff_scan_secrets() {
     printf '%s\n' "$assigns" | while IFS= read -r line; do
       # Skip a line already reported by shape — one hit per line is enough.
       printf '%s\n' "$hit_lines" | grep -qxF "${line%%:*}" && continue
-      printf 'likely %s\n' "$(printf '%s' "$line" | handoff_mask_line)"
+      printf 'likely %s\n' "$(printf '%s' "$line" | handoff_mask_assignment)"
     done
   fi
 
@@ -201,8 +274,7 @@ handoff_scan_secrets() {
   return 1
 }
 
-# Keep the newest $keep handoffs in $store. Shared by --commit and --new so the
-# two cannot drift apart.
+# Keep the newest $keep handoffs in $store, counting the one about to be filed.
 handoff_prune() {
   local store="$1" keep="${2:-5}"
   [ "$keep" -gt 0 ] 2>/dev/null || return 0

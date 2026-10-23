@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
-# Prints where this project's handoffs live, and manages the optional in-tree
-# symlink that surfaces them inside the project.
+# Prints where this project's handoffs live, files new ones, and manages the
+# optional in-tree symlink that surfaces them inside the project.
 #
 #   handoff-path.sh                  -> the project's handoff directory
 #   handoff-path.sh --commit <draft> -> scan <draft> for secrets, then file it as
-#                                       this project's newest handoff and print
-#                                       the path. Refuses on a hit (exit 3) and
-#                                       writes nothing. This is how a handoff
-#                                       gets saved. Removes the draft on success.
+#                                       this project's newest handoff with a git
+#                                       snapshot appended, and print the path.
+#                                       Refuses on a hit (exit 3) and writes
+#                                       nothing. This is how a handoff gets
+#                                       saved. Removes the draft on success.
+#   handoff-path.sh --resume         -> newest handoff, then drift since it was
+#                                       filed and the project-map state. Marks
+#                                       it resumed, so the SessionStart hook
+#                                       stops offering it.
+#   handoff-path.sh --latest         -> newest handoff, or nothing (read-only)
 #   handoff-path.sh --scan <file>    -> report secrets without writing anything
-#   handoff-path.sh --latest         -> most recent existing handoff, or nothing
-#   handoff-path.sh --new            -> UNSCANNED path for a new handoff file.
-#                                       Escape hatch only; prefer --commit, which
-#                                       cannot be saved past a secret.
 #   handoff-path.sh --link           -> expose the directory as <project>/.claude/handoff
 #   handoff-path.sh --unlink         -> remove that symlink; files are untouched
 #   handoff-path.sh --link-status    -> report whether this project is linked
 #
 # Options:
 #   --dir <path>   treat <path> as the project. Default: $HANDOFF_PROJECT_DIR,
-#                  else $CLAUDE_PROJECT_DIR, else the enclosing repo root, else $PWD
+#                  else $CLAUDE_PROJECT_DIR, else $PWD; each folded to its repo root
 #   --keep <n>     how many handoffs to retain (default 5)
 #
 # Files always live in ~/.claude/handoff/<project>-<hash>/. The symlink is only
@@ -30,29 +32,32 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/handoff-lib.sh"
 
 mode="dir"
-project=""
+dir_arg=""
 draft=""
 keep=5
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --new)         mode="new" ;;
     --commit)      mode="commit"; draft="${2:-}"; shift ;;
+    --resume)      mode="resume" ;;
     --scan)        mode="scan";   draft="${2:-}"; shift ;;
     --latest)      mode="latest" ;;
     --link)        mode="link" ;;
     --unlink)      mode="unlink" ;;
     --link-status) mode="link-status" ;;
-    --dir)         project="${2:-}"; shift ;;
+    --dir)         dir_arg="${2:-}"; shift ;;
     --keep)        keep="${2:-5}"; shift ;;
-    -h|--help)     sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
 
-[ -z "$project" ] && project="$(handoff_project_dir_local)"
-project="${project%/}"
+if [ -n "$dir_arg" ]; then
+  project="$(handoff_canon_dir "$dir_arg")"
+else
+  project="$(handoff_project_dir_local)"
+fi
 store="$(handoff_store "$project")"
 link="$(handoff_link_path "$project")"
 
@@ -75,15 +80,20 @@ case "$mode" in
     ;;
 
   latest)
-    newest="$(ls -t "$store"/claude-handoff-*.md 2>/dev/null | head -n1)"
+    newest="$(handoff_latest "$store")"
     [ -n "$newest" ] && printf '%s/%s\n' "$(resolve_base)" "${newest##*/}"
     ;;
 
-  new)
-    mkdir -p "$store" || exit 1
-    handoff_prune "$store" "$keep"
-    echo "note: --new bypasses the secret scan; use --commit <draft> to file a handoff." >&2
-    printf '%s/claude-handoff-%s.md\n' "$(resolve_base)" "$(date '+%Y-%m-%d-%H%M')"
+  resume)
+    newest="$(handoff_latest "$store")"
+    [ -n "$newest" ] || exit 0
+    # The hook skips the handoff named here, so this one stops being offered
+    # and the next one filed is offered as usual.
+    printf '%s\n' "${newest##*/}" > "$store/.resumed"
+    printf '%s/%s\n' "$(resolve_base)" "${newest##*/}"
+    handoff_drift "$project" "$newest"
+    # project-map, like the agent, works from where the session started.
+    handoff_map_state "${dir_arg:-$PWD}"
     ;;
 
   scan)
@@ -121,14 +131,24 @@ case "$mode" in
     n=2
     while [ -e "$dest" ]; do dest="$base-$n.md"; n=$((n + 1)); done
 
-    hdr='<!-- HIGHLY SENSITIVE. Do not share this file. -->'
-    if [ "$(head -n1 "$draft")" = "$hdr" ]; then
-      cp "$draft" "$dest" || exit 1
-    else
-      { printf '%s\n' "$hdr"; cat "$draft"; } > "$dest" || exit 1
-      echo "note: prepended the sensitivity header, which the draft was missing." >&2
-    fi
-    chmod 600 "$dest" 2>/dev/null || true
+    # The header and the snapshot are generated here, so drop any copy carried
+    # over from an older handoff: a stale HEAD would mislead --resume's drift
+    # report. Only those generated lines go; anything written after an old
+    # snapshot stays. umask keeps the file private from the moment it exists.
+    ( umask 077
+      {
+        printf '%s\n' '<!-- HIGHLY SENSITIVE. Do not share this file. -->'
+        awk '
+          NR == 1 && /^<!-- HIGHLY SENSITIVE/   { next }
+          /^## Snapshot \(auto\)$/              { skip = 1; blanks = 0; next }
+          skip && /^- (Branch|HEAD|Uncommitted): / { next }
+                                                { skip = 0 }
+          /^[ \t]*$/                            { blanks++; next }
+          { while (blanks > 0) { print ""; blanks-- } print }
+        ' "$draft"
+        handoff_snapshot "$project"
+      } > "$dest"
+    ) || exit 1
     rm -f "$draft"
     printf '%s\n' "$dest"
     ;;

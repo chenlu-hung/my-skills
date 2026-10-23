@@ -6,7 +6,7 @@ Personal collection of [Claude Code](https://claude.com/claude-code) Agent Skill
 
 | Skill | Purpose |
 |---|---|
-| [`handoff`](./handoff) | Context transfer between AI coding sessions — creates a compact handoff doc so a fresh agent can resume. Handoffs are **scoped per project** under `~/.claude/handoff/<project>-<hash>/`, so several projects in flight never cross-contaminate; a SessionStart hook (`check-handoff.sh`) offers a resume only for the project you opened. `handoff-path.sh --link` optionally surfaces them in-tree as `<project>/.claude/handoff` — a symlink, so `git clean -xdf` costs you the link and not the content, and the hook restores it. Saving goes through `handoff-path.sh --commit <draft>`, which **scans for secrets and refuses to file the handoff on a hit** — a gate rather than a checklist item, because handoffs get written exactly when context is running out and a manual step is easiest to skip. It reports masked hits and never rewrites the draft: an altered document is harder to notice than a refusal. Integrates with `project-map` (below) to keep docs lean and cut resume-time exploration. |
+| [`handoff`](./handoff) | Context transfer between AI coding sessions — creates a compact handoff doc so a fresh agent can resume. Handoffs are **scoped per project** under `~/.claude/handoff/<project>-<hash>/`, so several projects in flight never cross-contaminate; a SessionStart hook (`check-handoff.sh`) offers a resume only for the project you opened, only into a fresh context (startup or `/clear`), and only once per handoff. `handoff-path.sh --link` optionally surfaces them in-tree as `<project>/.claude/handoff` — a symlink, so `git clean -xdf` costs you the link and not the content, and the hook restores it. Saving goes through `handoff-path.sh --commit <draft>`, which **scans for secrets and refuses to file the handoff on a hit** — a gate rather than a checklist item, because handoffs get written exactly when context is running out and a manual step is easiest to skip. It reports masked hits and never rewrites the draft: an altered document is harder to notice than a refusal. Filing appends a **git snapshot** (branch, HEAD, uncommitted files), the facts a hurried writer leaves out, and `--resume` reports what moved since. Integrates with `project-map` (below) to keep docs lean and cut resume-time exploration. |
 | [`grill-me`](./grill-me) | Stress-tests a plan or design by interviewing you relentlessly until the decision tree is resolved. |
 | [`FableAdvisor`](./FableAdvisor) | Codifies the Anthropic-recommended architect/implementer split: Fable 5 (the session) runs `grill-me`'s interview, designs the architecture into a self-contained doc, then hands off to an **implementer subagent** (default Sonnet 5; overridable to opus/haiku, e.g. `/fable-advisor opus`) that implements against the doc and consults Fable (via `CONSULT` → SendMessage ruling) when blocked on design; Fable reviews the diff against the doc before closing. Installs as `fable-advisor`. |
 | [`write-register`](./write-register) | Picks the writing register per output segment, automatically. One test decides it — *will this text still exist after the conversation ends?* — routing to **CHAT** (dense but not telegraphic: it deletes whole moves like restatement and self-summary, and keeps the grammar), **DOC** (natural, self-contained prose for anything that gets saved, with 中文 and English AI-tell lists), or **CODE** (byte-exact, prose rules off). Supersedes `caveman` and `stop-slop`, which contradicted each other — one wanted fragments, the other complete sentences, and neither knew which text it was looking at. Ships as a Claude Code **output style** (`keep-coding-instructions: true`, so the built-in engineering instructions stay), because a classifier that isn't in the system prompt can't classify; the tell lists and `check`/`fix` modes stay on demand in the skill. |
@@ -27,10 +27,7 @@ Not a skill, but lives here too:
 
 ## How `handoff` + `project-map` compose
 
-They attack the two halves of resume cost. `project-map` carries the *codebase structure* (where things are); `handoff` carries the *session state* (decisions, dead ends, next steps). During a handoff, the skill runs `project-map`'s read-only `status` check:
-
-- **On resume** — if the map is missing or stale, it offers to `build`/`update` so the fresh session reads the map instead of re-scanning the repo.
-- **On create** — it records a rebuild as a next step rather than spending build tokens at wrap-up.
+They attack the two halves of resume cost. `project-map` carries the *codebase structure* (where things are); `handoff` carries the *session state* (decisions, dead ends, next steps). `handoff-path.sh --resume` runs `project-map`'s read-only `status` check and reports the map as `current`, `stale` or `missing`, so the resuming session (fresh budget, and the one that benefits) can offer to `update`/`build` it and then read the map instead of re-scanning the repo. Creating a handoff doesn't check: wrap-up is when context is scarcest, and the resume checks again anyway.
 
 A current map also lets handoff docs link `.projectmap/ARCHITECTURE.md` instead of re-describing structure, so the doc the next session reads back stays small.
 
@@ -42,9 +39,16 @@ Copy any skill folder into `~/.claude/skills/`:
 cp -R handoff ~/.claude/skills/
 ```
 
-> **Note**: `handoff`'s SessionStart hook must be registered separately in `~/.claude/settings.json` and references `~/.claude/skills/handoff/check-handoff.sh`. Handoffs written before per-project scoping still sit unscoped in `$TMPDIR`; the hook counts them when the current project has none, so you can file or discard them.
+> **Note**: `handoff`'s SessionStart hook must be registered separately in `~/.claude/settings.json`:
 >
-> To use it from another harness, **link rather than copy** — `ln -s ~/.claude/skills/handoff ~/.codex/skills/handoff` — so both installs share one copy of the scripts and one store, and a handoff written on either side resumes on the other. Only the trigger differs: Claude Code's hook offers a resume unprompted, elsewhere the user asks and the skill runs `--latest`. Without `$CLAUDE_PROJECT_DIR` the scripts key the store on the enclosing repo root (`HANDOFF_PROJECT_DIR` overrides), so a session started deep in the tree still files its handoff where the next one looks.
+> ```json
+> "hooks": { "SessionStart": [ { "matcher": "startup|clear",
+>   "hooks": [ { "type": "command", "command": "bash ~/.claude/skills/handoff/check-handoff.sh" } ] } ] }
+> ```
+>
+> The script also ignores `compact` and `resume` events itself, so an offer never lands mid-session even without the matcher.
+>
+> To use it from another harness, **link rather than copy** — `ln -s ~/.claude/skills/handoff ~/.agents/skills/handoff` — so both installs share one copy of the scripts and one store, and a handoff written on either side resumes on the other. Only the trigger differs: Claude Code's hook offers a resume unprompted, elsewhere the user asks and the skill runs `--resume`. The store is keyed on the enclosing repo root (the physical path, `HANDOFF_PROJECT_DIR` overrides), whichever directory the session or the hook started from, so the hook always looks where the agent filed. Moving a project changes its key: move its store directory along with it.
 >
 > **Note**: `FableAdvisor` installs under its skill name: `cp -R FableAdvisor ~/.claude/skills/fable-advisor`. It expects `grill-me` to be installed too (Phase 1 invokes it).
 >
