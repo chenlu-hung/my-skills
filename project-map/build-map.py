@@ -123,6 +123,7 @@ This repo has a committed `.projectmap/` index. Read it before grepping, listing
 - Locate a definition with `grep -w '^Name' .projectmap/tags` (name, file, line, kind) instead of searching the tree.
 - Don't re-derive what the map already lists: no `ls`/`find`/`grep` sweeps for layout or symbol locations, and don't hand that exploration to a file-reading subagent. Open source files once you know which ones you need.
 - Before changing a module's interface, check its "Used by"; `python3 ~/.claude/skills/project-map/build-map.py affected` lists the modules and tests your uncommitted changes reach.
+- The map can lag the code. Modules that `python3 ~/.claude/skills/project-map/build-map.py status` lists as changed (Claude Code reports them at session start; elsewhere, run it once before relying on the map) may have stale docs: read their source instead. Every other module's doc is current.
 - `.projectmap/` is generated except the module summaries: don't hand-edit it; refresh with `/project-map update`."""
 
 # The unfenced block earlier versions told the agent to paste into CLAUDE.md;

@@ -98,7 +98,24 @@ created if neither exists) and into `AGENTS.md` / `GEMINI.md` when they exist, w
 symlinked file once and skipping one that points outside the project. It tells every
 agent, subagents included, to read the map before grepping, not to re-derive or delegate
 what the map lists, and to check "Used by" / `affected` before changing an interface.
-An unfenced pointer pasted by an older version is replaced in place.
+An unfenced pointer pasted by an older version is replaced in place. It also says that
+modules `status` lists as changed may have stale docs, so their source wins over the map.
+
+## Session-start check (Claude Code)
+
+`check-map.sh` is a SessionStart hook: in a fresh session (startup or `/clear`) it runs
+`status` on the nearest map at or above the launch directory and, only if modules changed
+since the last build/update, adds one note naming them. It never updates the map (that
+costs tokens and rewrites committed files — the user decides), and it stays silent when
+the map is current, when the project was never mapped, and on any error. Register it in
+`~/.claude/settings.json` next to any other SessionStart hook:
+
+```json
+{ "type": "command", "command": "bash ~/.claude/skills/project-map/check-map.sh", "timeout": 15 }
+```
+
+When the note appears, follow it: read the listed modules' source rather than their docs,
+and offer `/project-map update` if the task touches them.
 
 ## Rules
 
@@ -117,7 +134,8 @@ An unfenced pointer pasted by an older version is replaced in place.
   or "stop wasting tokens exploring."
 - After a substantial refactor or merge — offer `/project-map update`.
 - Before changing a module's interface or before a commit — `affected` shows what to retest.
-- At the start of a session in a mapped repo, if `/project-map status` would show heavy drift.
+- At the start of a session, when the session-start note (or `status`) lists changed
+  modules that the task touches.
 - During a **handoff** resume: the handoff skill runs `build-map.py status` to detect a
   missing or stale map and offers to `build`/`update` so the fresh session reads this map
   instead of re-scanning the repo. A current map keeps handoff docs small (they link
