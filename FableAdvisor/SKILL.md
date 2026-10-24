@@ -11,19 +11,20 @@ Pattern: the strongest model interrogates the plan, designs the architecture, an
 
 ## Phase 1 — Grill
 
-Invoke the **`grill-me` skill** and run **its Phase 1 only** (the interview). Stop before its Phase 2/3 — its decision log feeds Phase 2 here instead of grill-me's own task list and dispatch.
+Invoke the **`grill-me` skill** and run **its Phase 1 only** (the interview). Stop before its Phase 2/3 — the plan file it writes feeds Phase 2 here instead of grill-me's own task list and dispatch.
 
-Exit condition: a decision log with every load-bearing branch resolved.
+Exit condition: every load-bearing branch resolved and logged in the plan file grill-me started (`docs/plans/<YYYY-MM-DD>-<slug>.md`).
 
 ## Phase 2 — Architect
 
-Design the architecture from the decision log and write it to a doc. The doc is the **single source of truth** — the implementer never sees this conversation.
+Design the architecture from the decision log and write it into that same plan file. The file is the **single source of truth** — the implementer never sees this conversation. Never start a second doc.
 
-- Path: `docs/plans/<YYYY-MM-DD>-<slug>.md` in the target repo (create dirs as needed; if the user names a path, use theirs).
-- Content: fill the **ARCH doc template** in [templates.md](templates.md) — every section, no omissions.
+- Path: the plan file from Phase 1 (if the user names another path, move the file there).
+- Content: fill the **plan doc template** in [templates.md](templates.md) — add every section around grill-me's `## Decisions`, `## Terms` and `## Open`, which stay as written.
+- Each `PROTOTYPE` item in `## Open` becomes a task named `PROTOTYPE <what to build>`, ordered first; tasks under its branch are `blocked by` it and get specified after the user reacts (Phase 4).
 - **Self-containment test** before handoff: could a fresh session with no access to this conversation implement from the doc alone? If any task still needs conversation context, the doc is not done — bake that context in verbatim.
 
-Show the user the doc path plus a ≤10-line summary, then proceed — don't wait for a nod unless they stop you.
+Show the user the doc path plus a ≤10-line summary and **stop until they approve** — the same checkpoint as grill-me's Phase 2: is the granularity right, is each task blocked only by what genuinely gates it, should anything merge or split? Apply their changes to the file and ask again until they approve; the approval covers the handoff.
 
 ## Phase 3 — Handoff to the implementer
 
@@ -31,16 +32,17 @@ Show the user the doc path plus a ≤10-line summary, then proceed — don't wai
 
 Spawn the implementer with the **Agent tool**: `subagent_type: "general-purpose"`, `model: <implementer model>`, prompt = the **implementer brief template** in [templates.md](templates.md) with the blanks filled (the brief embeds the consult protocol). Background run is fine — completion re-invokes you.
 
-Parallelism rule (explicit, no judgment needed): one implementer by default; spawn parallel implementers **only** when the arch doc's task list contains ≥2 tasks whose file sets are disjoint, and then give each `isolation: "worktree"`.
+Parallelism rule (explicit, no judgment needed): one implementer by default; spawn parallel implementers **only** when the plan file's `## Tasks` contains ≥2 tasks whose `files:` sets are disjoint, and then give each `isolation: "worktree"`.
 
 ## Phase 4 — Advisor loop
 
 Each implementer run ends in either `DONE` or `CONSULT` (formats in templates.md). On `CONSULT`:
 
 1. Rule decisively — decision + why + what it forecloses, like a grill-me log line. Answer the design question; **don't write the code for it**.
-2. If the ruling *changes* the architecture, update the arch doc **first**, then reply — the doc must never lag the decisions.
-3. Reply with **SendMessage** to the same agent so its context survives. Never spawn a fresh agent to continue an existing task.
-4. Escalation rule (explicit): if the **same task** comes back a 3rd time, or the implementer reports a failed attempt on it twice, take that task over yourself and tell the implementer to skip to the next one.
+2. If the ruling *changes* the architecture, update the plan file **first** — the affected `## Decisions` line plus every section it touches — then reply. The doc must never lag the decisions.
+3. A consult on a finished `PROTOTYPE` task: show the user the prototype and wait for their reaction. Log it as a new `## Decisions` line, specify the tasks it blocks, then rule.
+4. Reply with **SendMessage** to the same agent so its context survives. Never spawn a fresh agent to continue an existing task.
+5. Escalation rule (explicit): if the **same task** comes back a 3rd time, or the implementer reports a failed attempt on it twice, take that task over yourself (set its `owner: advisor`) and tell the implementer to skip to the next one.
 
 Relay each consult and your ruling to the user in 1–2 lines as it happens.
 
@@ -48,8 +50,9 @@ Relay each consult and your ruling to the user in 1–2 lines as it happens.
 
 Never accept `DONE` blind:
 
-1. Read the full diff against the arch doc, task by task — is each "done when" criterion met?
-2. Run the verification commands named in the doc's Verification section yourself. Optionally run the `code-review` skill on the diff.
+1. Read the full diff against the plan file, task by task — is each "done when" criterion met?
+2. Run the verification commands named in the doc's `## Verification` yourself. Optionally run the `code-review` skill on the diff.
 3. Small deviations (naming, style, a missed edge case): fix yourself. Architecture-level deviations: send back via SendMessage, citing the doc section violated.
+4. Check off each task in `## Tasks` as it passes: `- [x] T3 … — verified: <real result line>`.
 
-Close with a per-task summary: what changed, verification result, consults resolved, anything you fixed or rejected. Leave the arch doc in the repo — it is the record.
+Close with a per-task summary: what changed, verification result, consults resolved, anything you fixed or rejected. Leave the plan file in the repo — it is the record.
