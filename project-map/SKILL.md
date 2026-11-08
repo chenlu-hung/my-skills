@@ -94,7 +94,8 @@ For `affected`, relay the module list and test files; offer to run those tests.
 
 On build/update the script writes a short, marker-fenced `## Project map` block (text in
 `POINTER_BODY` in `build-map.py`) into the project's `CLAUDE.md` (or `.claude/CLAUDE.md`;
-created if neither exists) and into `AGENTS.md` / `GEMINI.md` when they exist, writing a
+created if neither exists and there is no `AGENTS.md` — Claude Code stops reading
+`AGENTS.md` once a `CLAUDE.md` exists) and into `AGENTS.md` / `GEMINI.md` when they exist, writing a
 symlinked file once and skipping one that points outside the project. It tells every
 agent, subagents included, to read the map before grepping, not to re-derive or delegate
 what the map lists, and to check "Used by" / `affected` before changing an interface.

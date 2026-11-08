@@ -1090,15 +1090,19 @@ def fresh_arch(project: str, modblock: str, entries, builds) -> str:
 # Agent instruction files
 # --------------------------------------------------------------------------- #
 def pointer_targets(root: Path):
-    """Agent files that carry the pointer: Claude's (created if missing), plus
-    AGENTS.md (Codex, opencode) and GEMINI.md (Gemini, Antigravity) when the
-    project has them. A symlink is written once, through its target, and only
-    if that target is inside the project."""
+    """Agent files that carry the pointer: Claude's, plus AGENTS.md (Codex,
+    opencode) and GEMINI.md (Gemini, Antigravity) when the project has them.
+    CLAUDE.md is created only when the project has no AGENTS.md either: Claude
+    Code stops reading AGENTS.md once a CLAUDE.md exists, so a new one would hide
+    it. A symlink is written once, through its target, and only if that target
+    is inside the project."""
     claude = next((root / p for p in ("CLAUDE.md", ".claude/CLAUDE.md") if (root / p).exists()),
-                  root / "CLAUDE.md")
+                  None)
+    if claude is None and not (root / "AGENTS.md").exists():
+        claude = root / "CLAUDE.md"
     out, seen = [], set()
     for p in [claude, root / "AGENTS.md", root / "GEMINI.md"]:
-        if p != claude and not p.exists():
+        if p is None or (p != claude and not p.exists()):
             continue
         real = p.resolve()
         if real in seen:
