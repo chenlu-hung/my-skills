@@ -148,7 +148,11 @@ that task as `ok: false` and the rest proceed.
 - **`agy`** (Antigravity CLI) — signed in for Gemini models; `agy models` lists the
   live model names (`DEFAULT_GEMINI_MODEL` must be one of them).
 - **`opencode`** — v2+, signed in (`opencode auth`); the free slugs need no
-  subscription. v2 removed `--dir` and `--dangerously-skip-permissions`.
+  subscription. v2 removed `--dir` and `--dangerously-skip-permissions`. It takes
+  the session directory from `$PWD`, and its sessions run in a background service
+  that outlives the client — `dispatch.py` sets `$PWD`, names each session
+  `dispatch <task id>`, and interrupts it on timeout or Ctrl-C. Calling `opencode
+  run` by hand, do the same (`opencode api session.interrupt --param sessionID=…`).
 - **`python3`** (stdlib only) and **`git`** (for worktrees / change summaries).
 
 ## Rules

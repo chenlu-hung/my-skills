@@ -14,7 +14,8 @@ Adapted from llm-council/council.py, with three deliberate differences:
 Workers authenticate through their own subscription / sign-in, not API keys:
   - codex     -> Codex CLI `codex exec -s workspace-write` (ChatGPT subscription)
   - gemini    -> Antigravity CLI `agy --dangerously-skip-permissions -p`
-  - opencode  -> opencode CLI `opencode run --auto` (cwd = task dir; v2 has no --dir)
+  - opencode  -> opencode CLI `opencode run --auto` (cwd and $PWD = task dir; v2 has no --dir;
+                 the session is interrupted if the client times out or is killed)
 
 opencode falls back when it can't serve the task (model withdrawn, free quota
 spent, 5xx): each free slug in OPENCODE_FREE_MODELS in turn, then agy on
@@ -52,6 +53,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_TIMEOUT = 900  # seconds per task — work takes longer than Q&A
@@ -115,15 +117,34 @@ def run_gemini(t):
 def run_opencode(t):
     """opencode `run` in JSON mode with permissions auto-approved (`--auto`); the
     report is the concatenation of `type:text` events. opencode v2 dropped `--dir`
-    and `--dangerously-skip-permissions`, so cwd is what confines it to the task dir.
-    Provider failures (quota, 5xx) arrive as `type:error` events on stdout, not stderr."""
-    cmd = ["opencode", "run", "--format", "json", "--auto"]
+    and `--dangerously-skip-permissions`, and it takes the session directory from
+    $PWD, not from the real cwd — so both must point at the task dir, or the worker
+    lands in whatever directory dispatch.py was launched from.
+    Provider failures (quota, 5xx) arrive as `type:error` events on stdout, not stderr.
+
+    The session runs inside opencode's background service, so killing this client
+    (timeout, Ctrl-C) does not stop it — the service keeps working with --auto, and
+    resumes it after a restart. Hence the session id is chosen here, up front (the
+    stream may carry none before the kill), and the session is interrupted on the
+    way out of any abnormal exit."""
+    sid = f"ses_dispatch{uuid.uuid4().hex[:20]}"
+    cmd = ["opencode", "run", "--format", "json", "--auto",
+           "--session", sid, "--title", f"dispatch {t['id']}"]
     if t["model"]:
         cmd += ["-m", t["model"]]
     cmd += t["extra_args"] + [t["prompt"]]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=t["timeout"],
-                          cwd=t["dir"], stdin=subprocess.DEVNULL)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=t["timeout"],
+                              cwd=t["dir"], env=dict(os.environ, PWD=t["dir"]),
+                              stdin=subprocess.DEVNULL)
+    except BaseException:
+        try:
+            subprocess.run(["opencode", "api", "session.interrupt", "--param", f"sessionID={sid}"],
+                           capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+        except Exception:  # noqa: BLE001 — never mask the original failure
+            pass
+        raise
 
     texts, errors = [], []
     for line in (proc.stdout or "").splitlines():
