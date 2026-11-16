@@ -1,6 +1,6 @@
 ---
 name: dicos
-description: Run work on the DiCOS / NSTCCore (ASGC, twgrid) Slurm cluster through the `ssh dicos` alias — check the 2FA-authenticated connection, choose between home and group storage, sync code and data, pick a GPU or CPU partition, write and submit sbatch jobs, build conda environments, and monitor or debug jobs. Runs the same way in Claude Code, Codex, opencode, and pi. Use when the user mentions DiCOS, NSTCCore, twgrid, ASGC, `ssh dicos`, slurm-ui, /ceph/work, or says "丟到 DiCOS", "上 DiCOS 跑", "DiCOS 訓練", "送 slurm", "交 job", "群組空間", "submit a job on DiCOS", "train on the cluster".
+description: Run work on the DiCOS / NSTCCore (ASGC, twgrid) Slurm cluster through the `ssh dicos` alias — check the 2FA-authenticated connection, choose between home and group storage, sync code and data, pick a GPU or CPU partition, write and submit sbatch jobs, build conda environments, and monitor or debug jobs; also launch, drive and delete DiCOSApp browser sessions (JupyterLab on RTX 4090, L40S, A100) through a browser tool. Runs the same way in Claude Code, Codex, opencode, and pi. Use when the user mentions DiCOS, NSTCCore, twgrid, ASGC, `ssh dicos`, slurm-ui, /ceph/work, or says "丟到 DiCOS", "上 DiCOS 跑", "DiCOS 訓練", "送 slurm", "交 job", "群組空間", "submit a job on DiCOS", "train on the cluster", DiCOSApp, DiCOS-app, "DiCOS Apps", dockerapps, "Jupyter Lab GPU rtx4090", "用 4090 跑", "開 Jupyter session".
 ---
 
 # DiCOS
@@ -52,6 +52,15 @@ ssh -o BatchMode=yes dicos 'bash -lc "module avail 2>&1 | grep -i cuda"'
 If the check fails from inside an agent sandbox (Codex's, for one) while the user's
 terminal is connected, the sandbox is blocking the control socket or the network.
 Request permission to run outside the sandbox.
+
+## DiCOSApp (browser sessions)
+
+RTX 4090, L40S and RTX 3090 are not Slurm partitions. They run as DiCOSApp sessions,
+launched from <https://dicos.grid.sinica.edu.tw/dockerapps/> in a browser the user has
+signed in to. A session has one GPU, bills until it is deleted, and allows one session per
+card. **Read `references/dicosapp.md` before launching one**: it covers launching, the
+JupyterLab terminal API for running commands from a browser tool, detached runs logged to
+Ceph, getting code in without GitHub credentials, and deleting the session when work ends.
 
 ## Where things go
 
