@@ -54,11 +54,13 @@ offer different durations (2 hours, 1, 3 or 5 days).
 
 ## Billing
 
-DiCOSApp is paid per GPU-day like Slurm partitions, and it keeps billing while the session
-exists, even when the GPU is idle. Whether it bills the time used or the duration reserved is
-not documented. Treat a launch as a paid job: get budget approval first, queue work so the GPU
-is not idle, and press **Delete** as soon as the work ends. Deleting kills every process in
-the session, and there is no confirmation dialog: the button turns into "Deleting...".
+DiCOSApp is paid per GPU-day like Slurm partitions. It bills the time the session exists, from
+launch until it is deleted or reaches its End Time, not the duration chosen at launch
+(confirmed by the user on 2026-11-19). A long reservation costs nothing extra, but an idle
+session still bills. Treat a launch as a paid job: get budget approval first, estimate cost from
+the expected running time, queue work so the GPU is not idle, and press **Delete** as soon as
+the work ends. Deleting kills every process in the session, and there is no confirmation
+dialog: the button turns into "Deleting...".
 
 - Each running session shows `Open` and `Delete` both on its card and under "Currently Open
   Apps" (`a.terminatebtn` with the card's `data-app`). The "Currently Open Apps" panel is
